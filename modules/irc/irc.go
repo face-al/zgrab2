@@ -13,10 +13,11 @@ import (
 // is either a word or a three-digit numeric reply (RFC 2812, Section 2.4).
 
 // capLSEndRegex matches once the server has finished answering CAP LS: the
-// last line read is the final CAP LS line (a continuation line carries a "*"
-// before the capability list), an error numeric (4xx/5xx, e.g. 421 from a
-// server without CAP support), or an ERROR message.
-var capLSEndRegex = regexp.MustCompile(`(?:^|\n)(?::\S+ )?(?:CAP \S+ LS(?: [^*\r\n][^\r\n]*)?|[45]\d\d [^\r\n]*|ERROR [^\r\n]*)\r\n$`)
+// last line read is the final CAP LS line, whose capability list is a ":"
+// trailing parameter (a continuation line carries a "*" before it), an error
+// numeric (4xx/5xx, e.g. 421 from a server without CAP support), or an ERROR
+// message.
+var capLSEndRegex = regexp.MustCompile(`(?:^|\n)(?::\S+ )?(?:CAP \S+ LS :[^\r\n]*|[45]\d\d [^\r\n]*|ERROR [^\r\n]*)\r\n$`)
 
 // numericEndRegex matches once the last line read is a numeric reply or an
 // ERROR message; used for the reply to STARTTLS, which is a numeric (670 or 691).

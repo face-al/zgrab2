@@ -112,8 +112,9 @@ var ircLineRegex = regexp.MustCompile(`^(?::\S+ (?:[A-Za-z]+|\d\d\d) |(?:NOTICE|
 var errorLineRegex = regexp.MustCompile(`^(?::\S+ )?ERROR `)
 
 // capLSLineRegex captures the capability list of a CAP LS line, whether it is
-// the final line or a continuation line ("*" before the list).
-var capLSLineRegex = regexp.MustCompile(`^(?::\S+ )?CAP \S+ LS (?:\* )?:?(.*)$`)
+// the final line or a continuation line ("*" before the list). The list must be
+// a ":" trailing parameter, matching what TLS-Attacker expects.
+var capLSLineRegex = regexp.MustCompile(`^(?::\S+ )?CAP \S+ LS (?:\* )?:(.*)$`)
 
 // numericLineRegex captures the three-digit code of a numeric reply.
 var numericLineRegex = regexp.MustCompile(`^(?::\S+ )?(\d\d\d) `)
@@ -213,9 +214,9 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		conn = tlsConn
 	}
 	ircConn := Connection{Conn: conn}
-	// Version 302 lets the server split a long capability list over several
-	// lines; capLSEndRegex waits for the final one.
-	capLS, err := ircConn.SendCommand("CAP LS 302", capLSEndRegex)
+	// Bare CAP LS, as TLS-Attacker sends it. A server may still split a long
+	// capability list over several lines; capLSEndRegex waits for the final one.
+	capLS, err := ircConn.SendCommand("CAP LS", capLSEndRegex)
 	if err != nil {
 		if !scanner.config.IRCSecure {
 			result = nil

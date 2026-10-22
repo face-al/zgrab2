@@ -60,18 +60,44 @@ func TestSupportsSTARTTLS(t *testing.T) {
 		CapLS    string
 		Expected bool
 	}{
-		"tls":               {":irc.example.com CAP * LS :multi-prefix tls sasl\r\n", true},
-		"no tls":            {":irc.example.com CAP * LS :multi-prefix sasl\r\n", false},
-		"empty list":        {":irc.example.com CAP * LS :\r\n", false},
-		"tls on first line": {":irc.example.com CAP * LS * :tls away-notify\r\n:irc.example.com CAP * LS :sasl\r\n", true},
-		"sts is not tls":    {":irc.example.com CAP * LS :sts=port=6697\r\n", false},
-		"no cap support":    {":irc.example.com 421 * CAP :Unknown command\r\n", false},
+		"tls":                {":irc.example.com CAP * LS :multi-prefix tls sasl\r\n", true},
+		"no tls":             {":irc.example.com CAP * LS :multi-prefix sasl\r\n", false},
+		"empty list":         {":irc.example.com CAP * LS :\r\n", false},
+		"tls on first line":  {":irc.example.com CAP * LS * :tls away-notify\r\n:irc.example.com CAP * LS :sasl\r\n", true},
+		"sts is not tls":     {":irc.example.com CAP * LS :sts=port=6697\r\n", false},
+		"no cap support":     {":irc.example.com 421 * CAP :Unknown command\r\n", false},
+		"list without colon": {":irc.example.com CAP * LS tls\r\n", false},
 	}
 
 	for name, test := range testTable {
 		t.Run(name, func(t *testing.T) {
 			if got := supportsSTARTTLS(test.CapLS); got != test.Expected {
 				t.Errorf("supportsSTARTTLS(%q) = %v, wanted %v", test.CapLS, got, test.Expected)
+			}
+		})
+	}
+}
+
+func TestCapLSEndRegex(t *testing.T) {
+	testTable := map[string]struct {
+		Response string
+		Expected bool
+	}{
+		"final line":               {":irc.example.com CAP * LS :multi-prefix tls\r\n", true},
+		"empty list":               {":irc.example.com CAP * LS :\r\n", true},
+		"continuation line":        {":irc.example.com CAP * LS * :multi-prefix\r\n", false},
+		"continuation, then final": {":irc.example.com CAP * LS * :multi-prefix\r\n:irc.example.com CAP * LS :tls\r\n", true},
+		"list without colon":       {":irc.example.com CAP * LS tls\r\n", false},
+		"no list":                  {":irc.example.com CAP * LS\r\n", false},
+		"no cap support":           {":irc.example.com 421 * CAP :Unknown command\r\n", true},
+		"error":                    {"ERROR :Closing Link: 127.0.0.1 (Throttled)\r\n", true},
+		"incomplete line":          {":irc.example.com CAP * LS :tls", false},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			if got := capLSEndRegex.MatchString(test.Response); got != test.Expected {
+				t.Errorf("capLSEndRegex.MatchString(%q) = %v, wanted %v", test.Response, got, test.Expected)
 			}
 		})
 	}
