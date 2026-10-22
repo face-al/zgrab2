@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  irc_service_base:
+    build:
+      context: ./irc
+    image: "zgrab2_irc_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -138,6 +145,36 @@ services:
     hostname: "target"
     depends_on:
       - ipp_service_base
+
+  irc_starttls:
+    build:
+      context: ./irc/starttls
+    container_name: zgrab_irc_starttls
+    networks:
+      - irc-starttls-network
+    hostname: "target"
+    depends_on:
+      - irc_service_base
+
+  irc_no_starttls:
+    build:
+      context: ./irc/no-starttls
+    container_name: zgrab_irc_no_starttls
+    networks:
+      - irc-no-starttls-network
+    hostname: "target"
+    depends_on:
+      - irc_service_base
+
+  irc_ircs:
+    build:
+      context: ./irc/ircs
+    container_name: zgrab_irc_ircs
+    networks:
+      - irc-ircs-network
+    hostname: "target"
+    depends_on:
+      - irc_service_base
 
   managesieve:
     image: stalwartlabs/stalwart:latest
@@ -578,6 +615,21 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.28/30
+  irc-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.200/30
+  irc-no-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.204/30
+  irc-ircs-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.208/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:
