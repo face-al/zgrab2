@@ -126,12 +126,12 @@ func TestIRCSTARTTLSSuccess(t *testing.T) {
 		TLSWrapper: testhelpers.MakeInsecureTLSWrapper(),
 	}
 
-	status, result, err := scanner.Scan(context.Background(), dialGroup, target)
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
 	if err := <-srvDone; err != nil {
 		t.Fatalf("server-side TLS handshake error: %v", err)
 	}
 	if status != zgrab2.SCAN_SUCCESS {
-		t.Fatalf("expected SCAN_SUCCESS, got %s (%v)", status, err)
+		t.Fatalf("expected SCAN_SUCCESS, got %s", status)
 	}
 	ircResult := result.(*ScanResults)
 	if !strings.Contains(ircResult.CapLS, "CAP * LS :tls") {
