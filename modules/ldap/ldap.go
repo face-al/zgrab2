@@ -10,10 +10,10 @@ import (
 )
 
 // LDAP messages are BER-encoded (RFC 4511, Section 5.1) with only the definite
-// form of length encoding. Real servers do not use the shortest encoding: Active
-// Directory and 389 Directory Server send four-octet long-form lengths (0x84) on
-// every element, so every element is parsed with nextTLV and minimal encoding is
-// never required.
+// form of length encoding. Real servers do not always use the shortest length:
+// Active Directory sends four-octet long-form lengths (0x84), so every element
+// is parsed with nextTLV and minimal length encoding is never required. INTEGER
+// contents must still be minimal (X.690, Section 8.3.2).
 
 // BER tags used by the module (RFC 4511, Section 4 and Appendix B).
 const (
@@ -258,13 +258,14 @@ func nextTLV(b []byte) (tag byte, content, rest []byte, err error) {
 }
 
 // parseInt parses the content of a BER INTEGER or ENUMERATED that fits in 32
-// bits; leading zero or sign octets (non-minimal encodings) are accepted.
+// bits. Leading zero or sign octets are rejected (X.690, Section 8.3.2), so a
+// padded resultCode such as 0a 02 00 00 is not read as success.
 func parseInt(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, protocolError("empty integer")
 	}
-	for len(b) > 1 && (b[0] == 0x00 && b[1]&0x80 == 0 || b[0] == 0xff && b[1]&0x80 != 0) {
-		b = b[1:]
+	if len(b) > 1 && (b[0] == 0x00 && b[1]&0x80 == 0 || b[0] == 0xff && b[1]&0x80 != 0) {
+		return 0, protocolError("integer not minimally encoded")
 	}
 	if len(b) > 4 {
 		return 0, protocolError("integer of %d octets", len(b))

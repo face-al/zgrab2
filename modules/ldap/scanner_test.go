@@ -52,13 +52,13 @@ func extendedResponseMessage(msgID, code int, responseName string) []byte {
 }
 
 // adRootDSE is a root DSE reply in Active Directory's encoding: four-octet
-// lengths on every element, a non-minimal messageID, and a control after
-// the SearchResultDone's LDAPResult.
+// lengths on constructed elements, and a control after the SearchResultDone's
+// LDAPResult.
 var adRootDSE = func() []byte {
 	attribute := tlv84(tagSequence, append(tlv84(tagOctetString, []byte("supportedExtension")),
 		tlv84(tagSet, append(tlv84(tagOctetString, []byte("1.2.840.113556.1.4.1781")), tlv84(tagOctetString, []byte(startTLSOID))...))...))
 	entry := append(tlv84(tagOctetString, nil), tlv84(tagSequence, attribute)...)
-	id := tlv84(tagInteger, []byte{0x00, 0x00, 0x00, 0x01})
+	id := tlv(tagInteger, berInt(1))
 	done := append(tlv84(tagSearchResultDone, ldapResultContent(0, "")), tlv(0xa0, nil)...)
 	return append(tlv84(tagSequence, append(id, tlv84(tagSearchResultEntry, entry)...)),
 		tlv84(tagSequence, append(id, done...))...)
@@ -106,12 +106,15 @@ func TestParseInt(t *testing.T) {
 	}{
 		"zero":            {[]byte{0x00}, 0, true},
 		"one":             {[]byte{0x01}, 1, true},
-		"padded":          {[]byte{0x00, 0x00, 0x00, 0x01}, 1, true},
 		"high bit":        {[]byte{0x00, 0x80}, 128, true},
 		"negative":        {[]byte{0xff}, -1, true},
+		"negative 128":    {[]byte{0x80}, -128, true},
 		"max int32":       {[]byte{0x7f, 0xff, 0xff, 0xff}, 1<<31 - 1, true},
+		"padded":          {[]byte{0x00, 0x00, 0x00, 0x01}, 0, false},
+		"padded zero":     {[]byte{0x00, 0x00}, 0, false},
+		"padded negative": {[]byte{0xff, 0xff}, 0, false},
 		"too long":        {[]byte{0x01, 0x00, 0x00, 0x00, 0x00}, 0, false},
-		"padded too long": {[]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}, 1, true},
+		"padded too long": {[]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}, 0, false},
 		"empty":           {[]byte{}, 0, false},
 	}
 
@@ -139,6 +142,7 @@ func TestReadRootDSE(t *testing.T) {
 		"starttls not advertised": {append(rootDSEEntry(1, "1.3.6.1.4.1.4203.1.11.1"), searchResultDone(1, 0)...), false, 0, true},
 		"no extensions":           {append(rootDSEEntry(1), searchResultDone(1, 0)...), false, 0, true},
 		"active directory":        {adRootDSE, true, 0, true},
+		"padded message id":       {tlv(tagSequence, append(tlv(tagInteger, []byte{0x00, 0x01}), tlv(tagSearchResultDone, ldapResultContent(0, ""))...)), false, 0, false},
 		"access denied":           {searchResultDone(1, 50), false, 50, true},
 		"reference skipped": {append(append(rootDSEEntry(1, startTLSOID),
 			envelope(1, tlv(tagSearchResultReference, tlv(tagOctetString, []byte("ldap://other/"))))...), searchResultDone(1, 0)...), true, 0, true},
@@ -326,6 +330,8 @@ func TestLDAPSTARTTLSMalformedResponse(t *testing.T) {
 		"wrong protocolOp":  envelope(2, tlv(0x61, ldapResultContent(0, ""))),
 		"truncated result":  envelope(2, tlv(tagExtendedResponse, tlv(tagEnumerated, berInt(0)))),
 		"indefinite length": {0x30, 0x80, 0x02, 0x01, 0x02},
+		"padded resultCode": envelope(2, tlv(tagExtendedResponse, append(tlv(tagEnumerated, []byte{0x00, 0x00}),
+			append(tlv(tagOctetString, nil), tlv(tagOctetString, nil)...)...))),
 	}
 
 	for name, reply := range testTable {
@@ -339,6 +345,9 @@ func TestLDAPSTARTTLSMalformedResponse(t *testing.T) {
 			}
 			if result == nil || result.RootDSE == nil || result.StartTLS == nil || result.StartTLS.Raw == "" {
 				t.Errorf("expected root DSE and raw StartTLS reply kept, got %+v", result)
+			}
+			if result != nil && result.TLSLog != nil {
+				t.Errorf("expected no TLS handshake, got %+v", result.TLSLog)
 			}
 		})
 	}
