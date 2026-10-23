@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  nntp_service_base:
+    build:
+      context: ./nntp
+    image: "zgrab2_nntp_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -138,6 +145,26 @@ services:
     hostname: "target"
     depends_on:
       - ipp_service_base
+
+  nntp_starttls:
+    build:
+      context: ./nntp/starttls
+    container_name: zgrab_nntp_starttls
+    networks:
+      - nntp-starttls-network
+    hostname: "target"
+    depends_on:
+      - nntp_service_base
+
+  nntp_nntps:
+    build:
+      context: ./nntp/nntps
+    container_name: zgrab_nntp_nntps
+    networks:
+      - nntp-nntps-network
+    hostname: "target"
+    depends_on:
+      - nntp_service_base
 
   managesieve:
     image: stalwartlabs/stalwart:latest
@@ -583,6 +610,16 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.28/30
+  nntp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.224/30
+  nntp-nntps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.228/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:
