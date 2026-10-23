@@ -13,6 +13,8 @@ nntp_scan_response = SubRecord(
             {
                 "banner": String(),
                 "capabilities": String(),
+                "mode_reader": String(),
+                "reader_capabilities": String(),
                 "starttls": String(),
                 "implicit_tls": Boolean(),
                 "tls": zgrab2.tls_log,

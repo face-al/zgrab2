@@ -17,12 +17,20 @@
 // TLS-Attacker requires a space after the code. Lines must end in CRLF
 // (RFC 3977, Section 3.1); a server ending them in a bare LF times out.
 //
-// The scanner does not send MODE READER, so a mode-switching server in transit
-// mode (which lists MODE-READER but not STARTTLS) is reported without STARTTLS.
+// A mode-switching server (RFC 3977, Section 3.4.2) starts in transit mode,
+// whose capability list has MODE-READER but not STARTTLS; STARTTLS appears
+// only in reading mode. If the list has MODE-READER and no STARTTLS, the
+// scanner sends MODE READER (RFC 3977, Section 5.3), expects 200 or 201, sends
+// CAPABILITIES again and decides STARTTLS from that second list. This extra
+// step is not part of TLS-Attacker's NNTP STARTTLS dialog; it is done so that
+// such servers are counted as STARTTLS-capable. Any other reply to MODE READER
+// (502 for a transit-only server, which then closes the connection; RFC 3977,
+// Section 5.3.1) is reported as an application error with the reply kept.
+// MODE READER is never sent over TLS (RFC 4642, Section 5), so --nntps skips it.
 //
-// The output contains the server's greeting and its responses to CAPABILITIES
-// and to STARTTLS, and if STARTTLS was negotiated or --nntps was set, the
-// standard TLS logs.
+// The output contains the server's greeting and its responses to CAPABILITIES,
+// MODE READER and the second CAPABILITIES (if sent) and to STARTTLS, and if
+// STARTTLS was negotiated or --nntps was set, the standard TLS logs.
 package nntp
 
 import (
@@ -47,6 +55,14 @@ type ScanResults struct {
 
 	// Capabilities is the server's response to the CAPABILITIES command.
 	Capabilities string `json:"capabilities,omitempty"`
+
+	// ModeReader is the server's response to the MODE READER command, if it is
+	// sent (only when Capabilities lists MODE-READER but not STARTTLS).
+	ModeReader string `json:"mode_reader,omitempty"`
+
+	// ReaderCapabilities is the server's response to the CAPABILITIES command
+	// sent again after a successful MODE READER.
+	ReaderCapabilities string `json:"reader_capabilities,omitempty"`
 
 	// StartTLS is the server's response to the STARTTLS command, if it is sent.
 	StartTLS string `json:"starttls,omitempty"`
@@ -74,8 +90,9 @@ type Flags struct {
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
 	return zgrab2.NewTypedModule[Flags, Scanner, *Scanner]("nntp", "Network News Transfer Protocol (NNTP)",
-		"Fetch an NNTP server banner and capabilities, optionally over TLS. If the server advertises STARTTLS, "+
-			"we'll send STARTTLS and negotiate a TLS connection. "+
+		"Fetch an NNTP server banner and capabilities, optionally over TLS. If the server advertises MODE-READER "+
+			"but not STARTTLS, we'll send MODE READER and fetch the capabilities again. If the server advertises "+
+			"STARTTLS, we'll send STARTTLS and negotiate a TLS connection. "+
 			"This can be overridden with the --send-starttls-override flag.", 119)
 }
 
@@ -116,7 +133,8 @@ var statusRegex = regexp.MustCompile(`^(\d\d\d)(?: |\r\n)`)
 
 // Status codes the scanner checks for.
 const (
-	// Greetings of a server that accepts commands (RFC 3977, Section 5.1.1).
+	// Greetings of a server that accepts commands (RFC 3977, Section 5.1.1);
+	// also the replies to a successful MODE READER (Section 5.3.1).
 	codePostingAllowed    = 200
 	codePostingProhibited = 201
 	// Greetings of a server that then closes the connection (RFC 3977,
@@ -142,11 +160,31 @@ func getNNTPCode(response string) (int, error) {
 	return ret, nil
 }
 
+// Capability labels the scanner looks for (RFC 3977, Section 3.3.1 and
+// RFC 4642, Section 2.1).
+const (
+	capabilityModeReader = "MODE-READER"
+	capabilityStartTLS   = "STARTTLS"
+)
+
 // supportsSTARTTLS reports whether a CAPABILITIES response is a capability
-// list that includes the STARTTLS label. Only the lines of the data block are
+// list that includes the STARTTLS label.
+func supportsSTARTTLS(capabilities string) bool {
+	return hasCapability(capabilities, capabilityStartTLS)
+}
+
+// isModeSwitching reports whether a CAPABILITIES response is the transit-mode
+// list of a mode-switching server (RFC 3977, Section 3.4.2): it includes
+// MODE-READER but not STARTTLS, so STARTTLS may appear only after MODE READER.
+func isModeSwitching(capabilities string) bool {
+	return hasCapability(capabilities, capabilityModeReader) && !supportsSTARTTLS(capabilities)
+}
+
+// hasCapability reports whether a CAPABILITIES response is a capability list
+// that includes the given label. Only the lines of the data block are
 // examined, not the 101 status line, and a capability line's first token is
 // its (case-insensitive) label (RFC 3977, Section 3.3.1).
-func supportsSTARTTLS(capabilities string) bool {
+func hasCapability(capabilities, label string) bool {
 	if code, err := getNNTPCode(capabilities); err != nil || code != codeCapabilityList {
 		return false
 	}
@@ -158,7 +196,7 @@ func supportsSTARTTLS(capabilities string) bool {
 		// Undo dot-stuffing (RFC 3977, Section 3.1.1).
 		line = strings.TrimPrefix(line, ".")
 		fields := strings.Fields(line)
-		if len(fields) > 0 && strings.EqualFold(fields[0], "STARTTLS") {
+		if len(fields) > 0 && strings.EqualFold(fields[0], label) {
 			return true
 		}
 	}
@@ -170,9 +208,13 @@ func supportsSTARTTLS(capabilities string) bool {
 //  2. If --nntps is set, perform a TLS handshake.
 //  3. Read the greeting.
 //  4. Send CAPABILITIES and read the response.
-//  5. If the server advertises STARTTLS (or --send-starttls-override is set),
+//  5. If the server advertises MODE-READER but not STARTTLS (and neither
+//     --send-starttls-override nor --nntps is set), send MODE READER and, on
+//     200/201, send CAPABILITIES again; the second list replaces the first
+//     for step 6.
+//  6. If the server advertises STARTTLS (or --send-starttls-override is set),
 //     send STARTTLS, read the result, negotiate a TLS connection.
-//  6. Close the connection.
+//  7. Close the connection.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	l4Dialer := dialGroup.L4Dialer
 	if l4Dialer == nil {
@@ -230,6 +272,33 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send CAPABILITIES command: %w", err)
 	}
 	result.Capabilities = capabilities
+	// A mode-switching server shows STARTTLS only in reading mode, so switch
+	// first (once, and before any security command; RFC 3977, Section 5.3.2).
+	// Not over TLS: MODE READER MUST NOT follow a TLS negotiation (RFC 4642,
+	// Section 5), and there is no STARTTLS to find there anyway.
+	if !scanner.config.SendSTARTTLSOverride && !scanner.config.NNTPSecure && isModeSwitching(capabilities) {
+		var modeReader string
+		modeReader, err = nntpConn.SendCommand("MODE READER", lineEndRegex)
+		if err != nil {
+			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send MODE READER command: %w", err)
+		}
+		result.ModeReader = modeReader
+		code, err = getNNTPCode(modeReader)
+		if err != nil {
+			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not get MODE READER command code: %w", err)
+		}
+		// 200 and 201 are the only successes (RFC 3977, Section 5.3.1); 502
+		// means transit-only and the server closes the connection.
+		if code != codePostingAllowed && code != codePostingProhibited {
+			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("NNTP code %d returned from MODE READER command (%s)", code, strings.TrimSpace(modeReader))
+		}
+		// The capability list changed with the mode (RFC 3977, Section 3.4.2).
+		capabilities, err = nntpConn.SendCommand("CAPABILITIES", capabilitiesEndRegex)
+		if err != nil {
+			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send CAPABILITIES command after MODE READER: %w", err)
+		}
+		result.ReaderCapabilities = capabilities
+	}
 	shouldSendSTARTTLS := scanner.config.SendSTARTTLSOverride || supportsSTARTTLS(capabilities)
 	// If the server supports STARTTLS or user requests STARTTLS, and we haven't already negotiated a TLS connection
 	if shouldSendSTARTTLS && !scanner.config.NNTPSecure {

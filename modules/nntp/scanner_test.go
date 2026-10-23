@@ -344,3 +344,236 @@ func TestValidate(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+const (
+	testTransitCapabilities = "101 Capability list:\r\nVERSION 2\r\nIMPLEMENTATION INN 2.7.4\r\nIHAVE\r\nMODE-READER\r\nSTREAMING\r\n.\r\n"
+	testReaderCapabilities  = "101 Capability list:\r\nVERSION 2\r\nIMPLEMENTATION INN 2.7.4\r\nREADER\r\nSTARTTLS\r\n.\r\n"
+)
+
+func TestIsModeSwitching(t *testing.T) {
+	testTable := map[string]struct {
+		Capabilities string
+		Expected     bool
+	}{
+		"transit mode":              {testTransitCapabilities, true},
+		"lowercase":                 {"101 Capability list:\r\nmode-reader\r\n.\r\n", true},
+		"reader mode":               {testReaderCapabilities, false},
+		"mode-reader and starttls":  {"101 Capability list:\r\nMODE-READER\r\nSTARTTLS\r\n.\r\n", false},
+		"reader without starttls":   {"101 Capability list:\r\nVERSION 2\r\nREADER\r\n.\r\n", false},
+		"two tokens, not the label": {"101 Capability list:\r\nMODE READER\r\n.\r\n", false},
+		"prefix only":               {"101 Capability list:\r\nMODE-READERX\r\n.\r\n", false},
+		"argument only":             {"101 Capability list:\r\nIHAVE MODE-READER\r\n.\r\n", false},
+		"unknown command":           {"500 MODE-READER\r\n", false},
+		"empty list":                {"101 Capability list:\r\n.\r\n", false},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			if got := isModeSwitching(test.Capabilities); got != test.Expected {
+				t.Errorf("isModeSwitching(%q) = %v, wanted %v", test.Capabilities, got, test.Expected)
+			}
+		})
+	}
+}
+
+// runNNTPScript sends replies[0] as the greeting, then answers each command
+// the client sends with the next reply, in order; after the last reply it
+// calls fn (if non-nil) with serverConn so the caller can handle the TLS
+// phase. Each reply is written in the given number of pieces. The commands
+// read from the client are sent on the returned channel, which is closed when
+// the server is done. Runs in a goroutine; closes serverConn when done.
+func runNNTPScript(serverConn net.Conn, replies []string, pieces int, fn func(net.Conn)) <-chan string {
+	commands := make(chan string, len(replies))
+	write := func(s string) {
+		size := (len(s) + pieces - 1) / pieces
+		for len(s) > 0 {
+			n := min(size, len(s))
+			serverConn.Write([]byte(s[:n]))
+			s = s[n:]
+		}
+	}
+	go func() {
+		defer close(commands)
+		defer serverConn.Close()
+		write(replies[0])
+		buf := make([]byte, 512)
+		for _, reply := range replies[1:] {
+			n, err := serverConn.Read(buf)
+			if err != nil {
+				return
+			}
+			commands <- strings.TrimSpace(string(buf[:n]))
+			write(reply)
+		}
+		if fn != nil {
+			fn(serverConn)
+		}
+	}()
+	return commands
+}
+
+func collect(commands <-chan string) []string {
+	var ret []string
+	for c := range commands {
+		ret = append(ret, c)
+	}
+	return ret
+}
+
+func TestNNTPModeSwitching(t *testing.T) {
+	for _, pieces := range []int{1, 3} {
+		cert := testhelpers.GenerateTestCert(t)
+		clientConn, serverConn := net.Pipe()
+
+		srvDone := make(chan error, 1)
+		commands := runNNTPScript(serverConn, []string{
+			"200 news.example.com InterNetNews server INN 2.7.4 ready (transit mode)\r\n",
+			testTransitCapabilities,
+			"201 news.example.com InterNetNews NNRP server INN 2.7.4 ready (no posting)\r\n",
+			testReaderCapabilities,
+			"382 Begin TLS negotiation now\r\n",
+		}, pieces, func(conn net.Conn) {
+			srv := stdtls.Server(conn, &stdtls.Config{Certificates: []stdtls.Certificate{cert}})
+			srvDone <- srv.Handshake()
+		})
+
+		scanner, dialGroup, target := newTestScan(&Flags{}, clientConn, testhelpers.MakeInsecureTLSWrapper())
+		status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+		if err := <-srvDone; err != nil {
+			t.Fatalf("pieces=%d: server-side TLS handshake error: %v", pieces, err)
+		}
+		if status != zgrab2.SCAN_SUCCESS {
+			t.Fatalf("pieces=%d: expected SCAN_SUCCESS, got %s", pieces, status)
+		}
+		got := collect(commands)
+		want := []string{"CAPABILITIES", "MODE READER", "CAPABILITIES", "STARTTLS"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("pieces=%d: expected commands %q, got %q", pieces, want, got)
+		}
+		nntpResult := result.(*ScanResults)
+		if nntpResult.Capabilities != testTransitCapabilities {
+			t.Errorf("pieces=%d: expected transit capabilities kept, got %q", pieces, nntpResult.Capabilities)
+		}
+		if !strings.HasPrefix(nntpResult.ModeReader, "201 ") {
+			t.Errorf("pieces=%d: expected MODE READER reply, got %q", pieces, nntpResult.ModeReader)
+		}
+		if nntpResult.ReaderCapabilities != testReaderCapabilities {
+			t.Errorf("pieces=%d: expected reader capabilities, got %q", pieces, nntpResult.ReaderCapabilities)
+		}
+		if !strings.HasPrefix(nntpResult.StartTLS, "382 ") {
+			t.Errorf("pieces=%d: expected 382 STARTTLS response, got %q", pieces, nntpResult.StartTLS)
+		}
+		if nntpResult.TLSLog == nil || nntpResult.TLSLog.HandshakeLog == nil {
+			t.Fatalf("pieces=%d: expected TLS log", pieces)
+		}
+	}
+}
+
+func TestNNTPModeReaderRefused(t *testing.T) {
+	for _, reply := range []string{"502 Transit service only\r\n", "400 Service temporarily unavailable\r\n"} {
+		clientConn, serverConn := net.Pipe()
+		commands := runNNTPScript(serverConn, []string{"200 news.example.com ready\r\n", testTransitCapabilities, reply}, 2, nil)
+
+		scanner, dialGroup, target := newTestScan(&Flags{}, clientConn, testhelpers.MakeFailingTLSWrapper())
+		status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+		if status != zgrab2.SCAN_APPLICATION_ERROR {
+			t.Errorf("%q: expected SCAN_APPLICATION_ERROR, got %s", reply, status)
+		}
+		if got := collect(commands); len(got) != 2 || got[1] != "MODE READER" {
+			t.Errorf("%q: expected CAPABILITIES then MODE READER, got %q", reply, got)
+		}
+		nntpResult, ok := result.(*ScanResults)
+		if !ok || nntpResult.ModeReader != reply || nntpResult.ReaderCapabilities != "" || nntpResult.StartTLS != "" {
+			t.Errorf("%q: expected MODE READER reply kept and nothing after it, got %+v", reply, result)
+		}
+	}
+}
+
+func TestNNTPModeReaderNotSent(t *testing.T) {
+	testTable := map[string]struct {
+		Flags        Flags
+		Capabilities string
+	}{
+		"reader without starttls":  {Flags{}, "101 Capability list:\r\nVERSION 2\r\nREADER\r\n.\r\n"},
+		"mode-reader and starttls": {Flags{}, "101 Capability list:\r\nMODE-READER\r\nSTARTTLS\r\n.\r\n"},
+		"override":                 {Flags{SendSTARTTLSOverride: true}, testTransitCapabilities},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			// A third reply only answers a STARTTLS, which the first case never sends.
+			commands := runNNTPScript(serverConn, []string{"200 news.example.com ready\r\n", test.Capabilities, "580 Can not initiate TLS negotiation\r\n"}, 1, nil)
+
+			flags := test.Flags
+			scanner, dialGroup, target := newTestScan(&flags, clientConn, testhelpers.MakeFailingTLSWrapper())
+			_, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+			for _, c := range collect(commands) {
+				if c == "MODE READER" {
+					t.Errorf("MODE READER sent")
+				}
+			}
+			if nntpResult, ok := result.(*ScanResults); !ok || nntpResult.ModeReader != "" || nntpResult.ReaderCapabilities != "" {
+				t.Errorf("expected no MODE READER fields, got %+v", result)
+			}
+		})
+	}
+}
+
+func TestNNTPModeReaderOnce(t *testing.T) {
+	// The second list is not a reading-mode list (still MODE-READER, no
+	// STARTTLS; or not a list at all): no second MODE READER, no STARTTLS.
+	for _, second := range []string{testTransitCapabilities, "500 Unknown command\r\n"} {
+		clientConn, serverConn := net.Pipe()
+		commands := runNNTPScript(serverConn, []string{"200 news.example.com ready\r\n", testTransitCapabilities, "200 Reader mode\r\n", second}, 1, nil)
+
+		scanner, dialGroup, target := newTestScan(&Flags{}, clientConn, testhelpers.MakeFailingTLSWrapper())
+		status, result, err := scanner.Scan(context.Background(), dialGroup, target)
+		if status != zgrab2.SCAN_SUCCESS {
+			t.Fatalf("%q: expected SCAN_SUCCESS, got %s (%v)", second, status, err)
+		}
+		got := collect(commands)
+		want := []string{"CAPABILITIES", "MODE READER", "CAPABILITIES"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%q: expected commands %q, got %q", second, want, got)
+		}
+		if nntpResult := result.(*ScanResults); nntpResult.ReaderCapabilities != second || nntpResult.StartTLS != "" {
+			t.Errorf("%q: expected second list kept and no STARTTLS, got %+v", second, nntpResult)
+		}
+	}
+}
+
+func TestNNTPSecureNoModeReader(t *testing.T) {
+	// MODE READER MUST NOT follow a TLS negotiation (RFC 4642, Section 5), so
+	// a transit-mode list over --nntps is reported as is.
+	cert := testhelpers.GenerateTestCert(t)
+	clientConn, serverConn := net.Pipe()
+	var commands []string
+	srvDone := testhelpers.RunTLSServer(t, serverConn, cert, func(conn *stdtls.Conn) {
+		conn.Write([]byte("200 news.example.com ready (transit mode)\r\n"))
+		buf := make([]byte, 512)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			commands = append(commands, strings.TrimSpace(string(buf[:n])))
+			conn.Write([]byte(testTransitCapabilities))
+		}
+	})
+
+	scanner, dialGroup, target := newTestScan(&Flags{NNTPSecure: true}, clientConn, testhelpers.MakeInsecureTLSWrapper())
+	status, result, err := scanner.Scan(context.Background(), dialGroup, target)
+	if srvErr := <-srvDone; srvErr != nil {
+		t.Fatalf("server-side TLS error: %v", srvErr)
+	}
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("expected SCAN_SUCCESS, got %s (%v)", status, err)
+	}
+	if len(commands) != 1 || commands[0] != "CAPABILITIES" {
+		t.Errorf("expected only CAPABILITIES, got %q", commands)
+	}
+	if nntpResult := result.(*ScanResults); nntpResult.ModeReader != "" || nntpResult.ReaderCapabilities != "" || nntpResult.StartTLS != "" {
+		t.Errorf("expected no MODE READER over TLS, got %+v", nntpResult)
+	}
+}

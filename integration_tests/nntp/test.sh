@@ -29,10 +29,19 @@ function testNNTPS() {
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh nntp --nntps --port 563 > $ZGRAB_OUTPUT/nntp/nntps-tls.json
   dumpDockerLogs
 }
+
+# innd greets only its feed peers (incoming.conf: localhost) in transit mode,
+# so scan 127.0.0.1 from inside the container's network namespace.
+function testINND() {
+  CONTAINER_NAME=zgrab_nntp_innd
+  TARGET_NAME=127.0.0.1 CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh nntp > $ZGRAB_OUTPUT/nntp/innd-mode-reader.json
+  dumpDockerLogs
+}
 echo "nntp/test: Tests runner for nntp"
 
 testSTARTTLS
 testNNTPS
+testINND
 
 function checkFileForField() {
   FILE=$1
@@ -90,13 +99,25 @@ for file in $(find $OUTPUT_ROOT -iname "*.json"); do
   checkFileForField $file capabilities
 done
 
-# STARTTLS advertised -> STARTTLS sent and TLS negotiated
+# STARTTLS advertised -> STARTTLS sent and TLS negotiated; nnrpd is already
+# in reading mode, so no MODE READER
 checkFileForStatus $OUTPUT_ROOT/starttls.json success
 checkFileForField $OUTPUT_ROOT/starttls.json starttls
+checkFileForLackOfField $OUTPUT_ROOT/starttls.json mode_reader
+checkFileForLackOfField $OUTPUT_ROOT/starttls.json reader_capabilities
 checkFileForTLSHandshake $OUTPUT_ROOT/starttls.json
 
 # Implicit TLS -> TLS negotiated before the greeting, no STARTTLS
 checkFileForStatus $OUTPUT_ROOT/nntps-tls.json success
 checkFileForField $OUTPUT_ROOT/nntps-tls.json implicit_tls
 checkFileForLackOfField $OUTPUT_ROOT/nntps-tls.json starttls
+checkFileForLackOfField $OUTPUT_ROOT/nntps-tls.json mode_reader
 checkFileForTLSHandshake $OUTPUT_ROOT/nntps-tls.json
+
+# Mode-switching innd -> transit list without STARTTLS, MODE READER, reading
+# list with STARTTLS, STARTTLS sent and TLS negotiated
+checkFileForStatus $OUTPUT_ROOT/innd-mode-reader.json success
+checkFileForField $OUTPUT_ROOT/innd-mode-reader.json mode_reader
+checkFileForField $OUTPUT_ROOT/innd-mode-reader.json reader_capabilities
+checkFileForField $OUTPUT_ROOT/innd-mode-reader.json starttls
+checkFileForTLSHandshake $OUTPUT_ROOT/innd-mode-reader.json
