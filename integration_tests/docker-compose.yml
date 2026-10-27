@@ -44,6 +44,13 @@ services:
     depends_on:
         - service_base
 
+  xmpp_service_base:
+    build:
+      context: ./xmpp
+    image: "zgrab2_xmpp_service_base:latest"
+    depends_on:
+      - service_base
+
   # Modules Start
   amqp091-3.12.14:
     image: "rabbitmq:3.12.14"
@@ -552,6 +559,46 @@ services:
     depends_on:
       - service_base
 
+  xmpp_starttls:
+    build:
+      context: ./xmpp/starttls
+    container_name: zgrab_xmpp_starttls
+    networks:
+      - xmpp-starttls-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_no_starttls:
+    build:
+      context: ./xmpp/no-starttls
+    container_name: zgrab_xmpp_no_starttls
+    networks:
+      - xmpp-no-starttls-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_xmpps:
+    build:
+      context: ./xmpp/xmpps
+    container_name: zgrab_xmpp_xmpps
+    networks:
+      - xmpp-xmpps-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_ejabberd:
+    build:
+      context: ./xmpp/ejabberd
+    container_name: zgrab_xmpp_ejabberd
+    networks:
+      - xmpp-ejabberd-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
 networks:
   amqp091-3.12.14-network:
     driver: bridge
@@ -793,3 +840,23 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.192/30
+  xmpp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.0/30
+  xmpp-no-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.4/30
+  xmpp-xmpps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.8/30
+  xmpp-ejabberd-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.12/30
