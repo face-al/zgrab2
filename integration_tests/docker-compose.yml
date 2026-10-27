@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  nbd_service_base:
+    build:
+      context: ./nbd
+    image: "zgrab2_nbd_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -269,6 +276,26 @@ services:
     container_name: zgrab_mysql-8.0
     networks:
       - mysql-8.0-network
+
+  nbd_qemu_nbd:
+    build:
+      context: ./nbd/qemu-nbd
+    container_name: zgrab_nbd_qemu_nbd
+    networks:
+      - nbd-qemu-nbd-network
+    hostname: "target"
+    depends_on:
+      - nbd_service_base
+
+  nbd_nbdkit:
+    build:
+      context: ./nbd/nbdkit
+    container_name: zgrab_nbd_nbdkit
+    networks:
+      - nbd-nbdkit-network
+    hostname: "target"
+    depends_on:
+      - nbd_service_base
 
   ntp-4.2.6:
     container_name: "zgrab_ntp_4.2.6"
@@ -648,6 +675,16 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.80/30
+  nbd-qemu-nbd-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.248/30
+  nbd-nbdkit-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.252/30
   ntp-4.2.6-network:
     driver: bridge
     ipam:
