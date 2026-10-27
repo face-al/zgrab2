@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  lmtp_service_base:
+    build:
+      context: ./lmtp
+    image: "zgrab2_lmtp_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -138,6 +145,26 @@ services:
     hostname: "target"
     depends_on:
       - ipp_service_base
+
+  lmtp_starttls:
+    build:
+      context: ./lmtp/starttls
+    container_name: zgrab_lmtp_starttls
+    networks:
+      - lmtp-starttls-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
+
+  lmtp_no_starttls:
+    build:
+      context: ./lmtp/no-starttls
+    container_name: zgrab_lmtp_no_starttls
+    networks:
+      - lmtp-no-starttls-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
 
   managesieve:
     image: stalwartlabs/stalwart:latest
@@ -583,6 +610,16 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.28/30
+  lmtp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.236/30
+  lmtp-no-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.240/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:
