@@ -166,6 +166,16 @@ services:
     depends_on:
       - lmtp_service_base
 
+  lmtp_lmtps:
+    build:
+      context: ./lmtp/lmtps
+    container_name: zgrab_lmtp_lmtps
+    networks:
+      - lmtp-lmtps-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
+
   managesieve:
     image: stalwartlabs/stalwart:latest
     container_name: "zgrab_managesieve"
@@ -620,6 +630,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.240/30
+  lmtp-lmtps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.244/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:

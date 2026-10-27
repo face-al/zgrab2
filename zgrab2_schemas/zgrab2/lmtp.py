@@ -14,6 +14,7 @@ lmtp_scan_response = SubRecord(
                 "banner": String(),
                 "lhlo": String(),
                 "starttls": String(),
+                "implicit_tls": Boolean(),
                 "tls": zgrab2.tls_log,
             }
         )

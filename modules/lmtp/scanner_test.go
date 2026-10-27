@@ -399,3 +399,92 @@ func TestLMTPNotLMTP(t *testing.T) {
 		}
 	}
 }
+
+func TestLMTPSecure(t *testing.T) {
+	cert := testhelpers.GenerateTestCert(t)
+	clientConn, serverConn := net.Pipe()
+	srvDone := testhelpers.RunTLSServer(t, serverConn, cert, func(conn *stdtls.Conn) {
+		conn.Write([]byte(testBanner))
+		buf := make([]byte, 512)
+		conn.Read(buf) // LHLO
+		// Even if listed over TLS, which RFC 3207, Section 4.2 forbids, STARTTLS must not be sent.
+		conn.Write([]byte(testLHLO))
+	})
+
+	scanner, dialGroup, target := newTestScan(&Flags{LMTPSecure: true}, clientConn, testhelpers.MakeInsecureTLSWrapper())
+	status, result, err := scanner.Scan(context.Background(), dialGroup, target)
+	if srvErr := <-srvDone; srvErr != nil {
+		t.Fatalf("server-side TLS error: %v", srvErr)
+	}
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("expected SCAN_SUCCESS, got %s (%v)", status, err)
+	}
+	lmtpResult := result.(*ScanResults)
+	if !lmtpResult.ImplicitTLS || lmtpResult.TLSLog == nil || lmtpResult.StartTLS != "" {
+		t.Errorf("expected implicit TLS without STARTTLS, got %+v", lmtpResult)
+	}
+	if lmtpResult.Banner != testBanner || lmtpResult.LHLO != testLHLO {
+		t.Errorf("expected banner and LHLO read over TLS, got %+v", lmtpResult)
+	}
+}
+
+func TestLMTPSecureRefused(t *testing.T) {
+	testTable := map[string]struct {
+		Banner string
+		LHLO   string
+	}{
+		"greeting": {"554 5.7.1 No service for you\r\n", ""},
+		"lhlo":     {testBanner, "500 5.5.1 Unknown command\r\n"},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			cert := testhelpers.GenerateTestCert(t)
+			clientConn, serverConn := net.Pipe()
+			srvDone := testhelpers.RunTLSServer(t, serverConn, cert, func(conn *stdtls.Conn) {
+				conn.Write([]byte(test.Banner))
+				if test.LHLO == "" {
+					return
+				}
+				buf := make([]byte, 512)
+				conn.Read(buf) // LHLO
+				conn.Write([]byte(test.LHLO))
+			})
+
+			scanner, dialGroup, target := newTestScan(&Flags{LMTPSecure: true}, clientConn, testhelpers.MakeInsecureTLSWrapper())
+			status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+			if srvErr := <-srvDone; srvErr != nil {
+				t.Fatalf("server-side TLS error: %v", srvErr)
+			}
+			if status != zgrab2.SCAN_POST_TLS_APPLICATION_ERROR {
+				t.Errorf("expected SCAN_POST_TLS_APPLICATION_ERROR, got %s", status)
+			}
+			if result == nil || result.(*ScanResults).TLSLog == nil || result.(*ScanResults).Banner != test.Banner {
+				t.Errorf("expected banner and TLS log in result, got %v", result)
+			}
+		})
+	}
+}
+
+func TestLMTPSHandshakeError(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	scanner, dialGroup, target := newTestScan(&Flags{LMTPSecure: true}, clientConn, testhelpers.MakeFailingTLSWrapper())
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	if status != zgrab2.SCAN_HANDSHAKE_ERROR {
+		t.Errorf("expected SCAN_HANDSHAKE_ERROR, got %s", status)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result on handshake error")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	if err := (Flags{LMTPSecure: true, SendSTARTTLSOverride: true}).Validate(nil); err == nil {
+		t.Error("expected error for --lmtps with --send-starttls-override")
+	}
+	if err := (Flags{LMTPSecure: true}).Validate(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

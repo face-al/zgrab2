@@ -14,6 +14,12 @@
 // refuses LHLO is not found here at all. The scanner uses the standard TLS
 // flags for the handshake.
 //
+// The --lmtps flag tells the scanner to wrap the entire connection in a TLS
+// session. No port or service name is registered for LMTP over implicit TLS,
+// but servers run it (e.g. Dovecot with ssl on its LMTP listener). --lmtps
+// does not change the default port number from 24, so it should usually be
+// coupled with that server's --port.
+//
 // LHLO must name the client (RFC 5321, Section 4.1.1.1), so the scanner sends
 // --lhlo-domain, else the target's domain, else the address literal of its
 // own IP address (RFC 5321, Section 4.1.3); a bare LHLO is refused (e.g. 501
@@ -29,7 +35,8 @@
 // TLS-Attacker aborts on any such reply.
 //
 // The output contains the server's greeting, its responses to LHLO and
-// STARTTLS (if sent), and if STARTTLS was negotiated, the standard TLS logs.
+// STARTTLS (if sent), and if STARTTLS was negotiated or --lmtps was set, the
+// standard TLS logs.
 package lmtp
 
 import (
@@ -58,7 +65,11 @@ type ScanResults struct {
 	// StartTLS is the server's response to the STARTTLS command, if it is sent.
 	StartTLS string `json:"starttls,omitempty"`
 
-	// TLSLog is the standard TLS log, if STARTTLS is sent
+	// ImplicitTLS is true if the connection was wrapped in TLS, as opposed
+	// to using StartTLS
+	ImplicitTLS bool `json:"implicit_tls,omitempty"`
+
+	// TLSLog is the standard TLS log, if STARTTLS is sent or if --lmtps is used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
 }
 
@@ -71,13 +82,16 @@ type Flags struct {
 	// SendSTARTTLSOverride indicates that the client should send the STARTTLS command, regardless of if the server advertises support in LHLO
 	SendSTARTTLSOverride bool `long:"send-starttls-override" description:"Send the STARTTLS command regardless of if the server advertises support in LHLO"`
 
+	// LMTPSecure indicates that the entire transaction should be wrapped in a TLS session.
+	LMTPSecure bool `long:"lmtps" description:"Perform a TLS handshake immediately upon connecting."`
+
 	// LHLODomain is the client domain sent with LHLO; empty falls back to the target domain, then to our IP address literal.
 	LHLODomain string `long:"lhlo-domain" description:"Client domain to send with the LHLO command (default: target domain, else our IP address literal)"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
 	return zgrab2.NewTypedModule[Flags, Scanner, *Scanner]("lmtp", "Local Mail Transfer Protocol (LMTP)",
-		"Fetch an LMTP server banner and LHLO response. If the server advertises STARTTLS, we'll send STARTTLS "+
+		"Fetch an LMTP server banner and LHLO response, optionally over TLS. If the server advertises STARTTLS, we'll send STARTTLS "+
 			"and negotiate a TLS connection. This can be overridden with the --send-starttls-override flag.", 24)
 }
 
@@ -91,6 +105,9 @@ type Scanner struct {
 // On success, returns nil.
 // On failure, returns an error instance describing the error.
 func (flags Flags) Validate(_ []string) error {
+	if flags.SendSTARTTLSOverride && flags.LMTPSecure {
+		return errors.New("cannot use --lmtps and --send-starttls-override at the same time")
+	}
 	return nil
 }
 
@@ -177,11 +194,12 @@ func addressLiteral(addr net.Addr) string {
 
 // Scan performs the LMTP scan.
 //  1. Open a TCP connection to the target port (default 24).
-//  2. Read the greeting.
-//  3. Send LHLO and read the response.
-//  4. If the server advertises STARTTLS (or --send-starttls-override is set),
+//  2. If --lmtps is set, perform a TLS handshake.
+//  3. Read the greeting.
+//  4. Send LHLO and read the response.
+//  5. If the server advertises STARTTLS (or --send-starttls-override is set),
 //     send STARTTLS, read the result, negotiate a TLS connection.
-//  5. Close the connection.
+//  6. Close the connection.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	l4Dialer := dialGroup.L4Dialer
 	if l4Dialer == nil {
@@ -194,10 +212,34 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	defer zgrab2.CloseConnAndHandleError(conn)
 	result := &ScanResults{}
 
+	// appErrStatus maps an application-layer refusal to
+	// SCAN_POST_TLS_APPLICATION_ERROR once --lmtps has negotiated TLS.
+	appErrStatus := zgrab2.SCAN_APPLICATION_ERROR
+	if scanner.config.LMTPSecure {
+		tlsWrapper := dialGroup.TLSWrapper
+		if tlsWrapper == nil {
+			return zgrab2.SCAN_INVALID_INPUTS, nil, errors.New("no TLS wrapper found. LMTP with LMTPSecure requires a TLS wrapper")
+		}
+		var tlsConn *zgrab2.TLSConnection
+		tlsConn, err = tlsWrapper(ctx, target, conn)
+		if tlsConn != nil {
+			result.TLSLog = tlsConn.GetLog()
+		}
+		if err != nil {
+			return zgrab2.SCAN_HANDSHAKE_ERROR, result, fmt.Errorf("could not complete TLS handshake: %w", err)
+		}
+		result.ImplicitTLS = true
+		appErrStatus = zgrab2.SCAN_POST_TLS_APPLICATION_ERROR
+		conn = tlsConn
+	}
 	lmtpConn := Connection{Conn: conn}
 	banner, err := lmtpConn.ReadResponse()
 	if err != nil {
-		return zgrab2.TryGetScanStatus(err), nil, fmt.Errorf("could not read banner from %s: %w", target.String(), err)
+		if !scanner.config.LMTPSecure {
+			result = nil
+		}
+
+		return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not read banner from %s: %w", target.String(), err)
 	}
 	// Quit early if we didn't get a valid response
 	code, err := getLMTPCode(banner)
@@ -208,7 +250,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	}
 	result.Banner = banner
 	if code != codeServiceReady {
-		return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("LMTP server for target %s greeted with %d: %s", target.String(), code, strings.TrimSpace(banner))
+		return appErrStatus, result, fmt.Errorf("LMTP server for target %s greeted with %d: %s", target.String(), code, strings.TrimSpace(banner))
 	}
 	domain := scanner.config.LHLODomain
 	if domain == "" {
@@ -229,9 +271,10 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	// 500 here means an SMTP server, which does not know LHLO (RFC 5321,
 	// Section 4.2.4); LHLO tells the two apart (RFC 2033, Section 4.1).
 	if code != codeOK {
-		return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("LMTP code %d returned from LHLO command (%s)", code, strings.TrimSpace(lhlo))
+		return appErrStatus, result, fmt.Errorf("LMTP code %d returned from LHLO command (%s)", code, strings.TrimSpace(lhlo))
 	}
-	if scanner.config.SendSTARTTLSOverride || supportsSTARTTLS(lhlo) {
+	// If the server supports STARTTLS or user requests STARTTLS, and we haven't already negotiated a TLS connection
+	if (scanner.config.SendSTARTTLSOverride || supportsSTARTTLS(lhlo)) && !scanner.config.LMTPSecure {
 		var ret string
 		ret, err = lmtpConn.SendCommand("STARTTLS")
 		if err != nil {

@@ -29,10 +29,16 @@ function testNoSTARTTLS() {
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh lmtp > $ZGRAB_OUTPUT/lmtp/no-starttls.json
   dumpDockerLogs
 }
+function testLMTPS() {
+  CONTAINER_NAME=zgrab_lmtp_lmtps
+  CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh lmtp --lmtps > $ZGRAB_OUTPUT/lmtp/lmtps-tls.json
+  dumpDockerLogs
+}
 echo "lmtp/test: Tests runner for lmtp"
 
 testSTARTTLS
 testNoSTARTTLS
+testLMTPS
 
 function checkFileForField() {
   FILE=$1
@@ -99,3 +105,9 @@ checkFileForTLSHandshake $OUTPUT_ROOT/starttls.json
 checkFileForStatus $OUTPUT_ROOT/no-starttls.json success
 checkFileForLackOfField $OUTPUT_ROOT/no-starttls.json starttls
 checkFileForLackOfField $OUTPUT_ROOT/no-starttls.json tls
+
+# Implicit TLS -> TLS negotiated before the greeting, no STARTTLS
+checkFileForStatus $OUTPUT_ROOT/lmtps-tls.json success
+checkFileForField $OUTPUT_ROOT/lmtps-tls.json implicit_tls
+checkFileForLackOfField $OUTPUT_ROOT/lmtps-tls.json starttls
+checkFileForTLSHandshake $OUTPUT_ROOT/lmtps-tls.json
