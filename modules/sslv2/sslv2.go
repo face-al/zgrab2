@@ -298,7 +298,10 @@ func ParseServerHello(msg []byte) (*ServerHello, error) {
 		return nil, protocolError("server version 0x%04x", hello.Version)
 	case certLength == 0:
 		return nil, protocolError("no certificate")
-	case specsLength == 0 || specsLength%cipherSpecLength != 0:
+	// §5.5.1 requires a non-empty list only in the CLIENT-HELLO; a server
+	// that answers with a certificate and no cipher spec still committed to
+	// SSLv2 (TLS-Attacker's SSL2ServerHelloParser accepts it too).
+	case specsLength%cipherSpecLength != 0:
 		return nil, protocolError("cipher specs length %d", specsLength)
 	case connIDLength < minConnectionIDLength || connIDLength > maxConnectionIDLength:
 		return nil, protocolError("connection id length %d", connIDLength)

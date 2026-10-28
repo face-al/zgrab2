@@ -164,6 +164,20 @@ func TestServerHelloThreeByteHeader(t *testing.T) {
 	}
 }
 
+// TestServerHelloNoCipherSpecs checks that a SERVER-HELLO with a certificate
+// and an empty cipher spec list still succeeds (the server committed to
+// SSLv2; only the CLIENT-HELLO list must be non-empty, draft 5.5.1).
+func TestServerHelloNoCipherSpecs(t *testing.T) {
+	cert := fixture(t)[13 : 13+0x2fc]
+	status, result, err := scan(t, record(serverHello(0, 1, 2, cert, nil, testConnID)), 1)
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("expected SCAN_SUCCESS, got %s (%v)", status, err)
+	}
+	if len(result.ServerHello.CipherSpecs) != 0 || result.ServerHello.CipherSpecsRaw != "" {
+		t.Errorf("unexpected cipher specs %+v", result.ServerHello)
+	}
+}
+
 // TestCertificateParseError checks that a certificate that does not parse
 // does not fail the scan.
 func TestCertificateParseError(t *testing.T) {
@@ -220,7 +234,6 @@ func TestProtocolErrors(t *testing.T) {
 		"certificate type":    record(serverHello(0, 2, 2, cert, testSpecs, testConnID)),
 		"version 3.0":         record(serverHello(0, 1, 0x0300, cert, testSpecs, testConnID)),
 		"no certificate":      record(serverHello(0, 1, 2, nil, testSpecs, testConnID)),
-		"no cipher specs":     record(serverHello(0, 1, 2, cert, nil, testConnID)),
 		"partial cipher spec": record(serverHello(0, 1, 2, cert, testSpecs[:4], testConnID)),
 		"short connection id": record(serverHello(0, 1, 2, cert, testSpecs, testConnID[:15])),
 		"long connection id":  record(serverHello(0, 1, 2, cert, testSpecs, bytes.Repeat(testConnID, 3)[:33])),
