@@ -123,8 +123,13 @@ var numericLineRegex = regexp.MustCompile(`^(?::\S+ )?(\d\d\d) `)
 // ERR_STARTTLS (691) signals failure.
 const rplStartTLS = 670
 
+// splitLines splits a response into lines ending in CRLF or a bare LF.
 func splitLines(response string) []string {
-	return strings.Split(strings.TrimRight(response, "\r\n"), "\r\n")
+	lines := strings.Split(strings.TrimRight(response, "\r\n"), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 // VerifyIRCContents checks that the response looks like it came from an IRC
@@ -161,21 +166,27 @@ func supportsSTARTTLS(capLS string) bool {
 	return false
 }
 
-// getIRCCode returns the code of the last numeric reply in the response.
+// getIRCCode returns the code of the numeric that ended the STARTTLS reply
+// (startTLSEndRegex), or else the code of the last numeric reply in the response.
 func getIRCCode(response string) (int, error) {
-	lines := splitLines(response)
-	for i := len(lines) - 1; i >= 0; i-- {
-		match := numericLineRegex.FindStringSubmatch(lines[i])
-		if match == nil {
-			continue
-		}
-		ret, err := strconv.Atoi(match[1])
-		if err != nil {
-			return 0, ErrInvalidResponse
-		}
-		return ret, nil
+	code := ""
+	if match := startTLSEndRegex.FindStringSubmatch(response); match != nil {
+		code = match[1]
 	}
-	return 0, ErrInvalidResponse
+	lines := splitLines(response)
+	for i := len(lines) - 1; i >= 0 && code == ""; i-- {
+		if match := numericLineRegex.FindStringSubmatch(lines[i]); match != nil {
+			code = match[1]
+		}
+	}
+	if code == "" {
+		return 0, ErrInvalidResponse
+	}
+	ret, err := strconv.Atoi(code)
+	if err != nil {
+		return 0, ErrInvalidResponse
+	}
+	return ret, nil
 }
 
 // Scan performs the IRC scan.
@@ -240,11 +251,14 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	shouldSendSTARTTLS := scanner.config.SendSTARTTLSOverride || supportsSTARTTLS(capLS)
 	// If the server supports STARTTLS or user requests STARTTLS, and we haven't already negotiated a TLS connection
 	if shouldSendSTARTTLS && !scanner.config.IRCSecure {
-		ret, err := ircConn.SendCommand("STARTTLS", numericEndRegex)
+		ret, err := ircConn.SendCommand("STARTTLS", startTLSEndRegex)
 		if err != nil {
 			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send STARTTLS command: %w", err)
 		}
 		result.StartTLS = ret
+		if VerifyIRCContents(ret) == zgrab2.SCAN_APPLICATION_ERROR {
+			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("IRC server closed the connection after STARTTLS: %s", strings.TrimSpace(ret))
+		}
 		code, err := getIRCCode(ret)
 		if err != nil {
 			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not get STARTTLS command code: %w", err)

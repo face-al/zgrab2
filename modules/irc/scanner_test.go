@@ -64,6 +64,7 @@ func TestSupportsSTARTTLS(t *testing.T) {
 		"no tls":             {":irc.example.com CAP * LS :multi-prefix sasl\r\n", false},
 		"empty list":         {":irc.example.com CAP * LS :\r\n", false},
 		"tls on first line":  {":irc.example.com CAP * LS * :tls away-notify\r\n:irc.example.com CAP * LS :sasl\r\n", true},
+		"bare lf":            {":irc.example.com NOTICE * :*** Looking up your hostname...\n:irc.example.com CAP * LS :multi-prefix tls\n", true},
 		"sts is not tls":     {":irc.example.com CAP * LS :sts=port=6697\r\n", false},
 		"no cap support":     {":irc.example.com 421 * CAP :Unknown command\r\n", false},
 		"list without colon": {":irc.example.com CAP * LS tls\r\n", false},
@@ -83,21 +84,80 @@ func TestCapLSEndRegex(t *testing.T) {
 		Response string
 		Expected bool
 	}{
-		"final line":               {":irc.example.com CAP * LS :multi-prefix tls\r\n", true},
-		"empty list":               {":irc.example.com CAP * LS :\r\n", true},
-		"continuation line":        {":irc.example.com CAP * LS * :multi-prefix\r\n", false},
-		"continuation, then final": {":irc.example.com CAP * LS * :multi-prefix\r\n:irc.example.com CAP * LS :tls\r\n", true},
-		"list without colon":       {":irc.example.com CAP * LS tls\r\n", false},
-		"no list":                  {":irc.example.com CAP * LS\r\n", false},
-		"no cap support":           {":irc.example.com 421 * CAP :Unknown command\r\n", true},
-		"error":                    {"ERROR :Closing Link: 127.0.0.1 (Throttled)\r\n", true},
-		"incomplete line":          {":irc.example.com CAP * LS :tls", false},
+		"final line":                  {":irc.example.com CAP * LS :multi-prefix tls\r\n", true},
+		"empty list":                  {":irc.example.com CAP * LS :\r\n", true},
+		"continuation line":           {":irc.example.com CAP * LS * :multi-prefix\r\n", false},
+		"continuation, then final":    {":irc.example.com CAP * LS * :multi-prefix\r\n:irc.example.com CAP * LS :tls\r\n", true},
+		"list without colon":          {":irc.example.com CAP * LS tls\r\n", false},
+		"no list":                     {":irc.example.com CAP * LS\r\n", false},
+		"no cap support":              {":irc.example.com 421 * CAP :Unknown command\r\n", true},
+		"error":                       {"ERROR :Closing Link: 127.0.0.1 (Throttled)\r\n", true},
+		"incomplete line":             {":irc.example.com CAP * LS :tls", false},
+		"notice after final line":     {":irc.example.com CAP * LS :tls\r\n:irc.example.com NOTICE * :*** Could not resolve your hostname\r\n", true},
+		"notice only":                 {":irc.example.com NOTICE * :*** Looking up your hostname...\r\n", false},
+		"cap ls inside notice":        {":irc.example.com NOTICE * :CAP * LS :tls\r\n", false},
+		"continuation, notice, final": {":irc.example.com CAP * LS * :multi-prefix\r\n:irc.example.com NOTICE * :*** Found your hostname\r\n:irc.example.com CAP * LS :tls\r\n", true},
+		"continuation, notice":        {":irc.example.com CAP * LS * :multi-prefix\r\n:irc.example.com NOTICE * :*** Found your hostname\r\n", false},
+		"bare lf":                     {":irc.example.com CAP * LS :tls\n", true},
 	}
 
 	for name, test := range testTable {
 		t.Run(name, func(t *testing.T) {
 			if got := capLSEndRegex.MatchString(test.Response); got != test.Expected {
 				t.Errorf("capLSEndRegex.MatchString(%q) = %v, wanted %v", test.Response, got, test.Expected)
+			}
+		})
+	}
+}
+
+func TestStartTLSEndRegex(t *testing.T) {
+	testTable := map[string]struct {
+		Response string
+		Expected bool
+	}{
+		"670":                {":irc.example.com 670 * :STARTTLS successful\r\n", true},
+		"691":                {":irc.example.com 691 * :STARTTLS failed\r\n", true},
+		"451":                {":irc.example.com 451 * STARTTLS :You have not registered\r\n", true},
+		"error":              {"ERROR :Closing Link: 127.0.0.1\r\n", true},
+		"notice after 670":   {":irc.example.com 670 * :STARTTLS successful\r\n:irc.example.com NOTICE * :*** Found your hostname\r\n", true},
+		"other numeric only": {":irc.example.com 020 * :Please wait while we process your connection.\r\n", false},
+		"notice only":        {":irc.example.com NOTICE * :*** Found your hostname\r\n", false},
+		"incomplete line":    {":irc.example.com 670 * :STARTTLS successful", false},
+		"670 inside notice":  {":irc.example.com NOTICE * :670 ok\r\n", false},
+		"bare lf":            {":irc.example.com 670 * :STARTTLS successful\n", true},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			if got := startTLSEndRegex.MatchString(test.Response); got != test.Expected {
+				t.Errorf("startTLSEndRegex.MatchString(%q) = %v, wanted %v", test.Response, got, test.Expected)
+			}
+		})
+	}
+}
+
+func TestGetIRCCode(t *testing.T) {
+	testTable := map[string]struct {
+		Response string
+		Expected int
+		Error    bool
+	}{
+		"670":                  {Response: ":irc.example.com 670 * :STARTTLS successful\r\n", Expected: 670},
+		"other numeric first":  {Response: ":irc.example.com 020 * :Please wait\r\n:irc.example.com 670 * :STARTTLS successful\r\n", Expected: 670},
+		"other numeric after":  {Response: ":irc.example.com 670 * :STARTTLS successful\r\n:irc.example.com 020 * :Please wait\r\n", Expected: 670},
+		"nonstandard numeric":  {Response: ":irc.example.com 679 * :STARTTLS successful\r\n", Expected: 679},
+		"error without number": {Response: "ERROR :Closing Link: 127.0.0.1\r\n", Error: true},
+		"no numeric":           {Response: ":irc.example.com NOTICE * :*** Found your hostname\r\n", Error: true},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			code, err := getIRCCode(test.Response)
+			if (err != nil) != test.Error {
+				t.Fatalf("getIRCCode(%q) error = %v, wanted error: %v", test.Response, err, test.Error)
+			}
+			if code != test.Expected {
+				t.Errorf("getIRCCode(%q) = %d, wanted %d", test.Response, code, test.Expected)
 			}
 		})
 	}
@@ -171,6 +231,41 @@ func TestIRCSTARTTLSSuccess(t *testing.T) {
 	}
 }
 
+// InspIRCd sends its hostname lookup result after the CAP LS reply; the scan
+// must not wait for the read timeout before sending STARTTLS.
+func TestIRCSTARTTLSNoticeAfterCapLS(t *testing.T) {
+	cert := testhelpers.GenerateTestCert(t)
+	clientConn, serverConn := net.Pipe()
+
+	srvDone := make(chan error, 1)
+	runIRCPreTLS(serverConn,
+		":irc.local NOTICE * :*** Looking up your hostname...\r\n:irc.local CAP * LS :inspircd.org/poison tls \r\n:irc.local NOTICE * :*** Could not resolve your hostname; using your IP address instead.\r\n",
+		":irc.local 670 * :STARTTLS successful, go ahead with TLS handshake\r\n",
+		1, // one write: net.Pipe has no buffer for the NOTICE while we send STARTTLS
+		func(conn net.Conn) {
+			srv := stdtls.Server(conn, &stdtls.Config{Certificates: []stdtls.Certificate{cert}})
+			srvDone <- srv.Handshake()
+		})
+
+	scanner := &Scanner{config: &Flags{}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 6667}
+	dialGroup := &zgrab2.DialerGroup{
+		L4Dialer:   testhelpers.MakeL4Dialer(clientConn),
+		TLSWrapper: testhelpers.MakeInsecureTLSWrapper(),
+	}
+
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	if err := <-srvDone; err != nil {
+		t.Fatalf("server-side TLS handshake error: %v", err)
+	}
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("expected SCAN_SUCCESS, got %s", status)
+	}
+	if ircResult := result.(*ScanResults); !strings.Contains(ircResult.StartTLS, " 670 ") {
+		t.Errorf("expected 670 STARTTLS response, got %q", ircResult.StartTLS)
+	}
+}
+
 func TestIRCSTARTTLSNotAdvertised(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	runIRCPreTLS(serverConn, ":irc.example.com CAP * LS :multi-prefix sasl\r\n", "", 1, nil)
@@ -213,6 +308,30 @@ func TestIRCSTARTTLSRefused(t *testing.T) {
 	}
 	if result == nil || !strings.Contains(result.(*ScanResults).StartTLS, " 691 ") {
 		t.Errorf("expected 691 STARTTLS response in result, got %v", result)
+	}
+}
+
+func TestIRCSTARTTLSError(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	runIRCPreTLS(serverConn,
+		":irc.example.com CAP * LS :tls\r\n",
+		":irc.example.com 020 * :Please wait while we process your connection.\r\nERROR :Closing Link: 127.0.0.1 (Throttled)\r\n",
+		1,
+		func(net.Conn) {})
+
+	scanner := &Scanner{config: &Flags{}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 6667}
+	dialGroup := &zgrab2.DialerGroup{
+		L4Dialer:   testhelpers.MakeL4Dialer(clientConn),
+		TLSWrapper: testhelpers.MakeFailingTLSWrapper(),
+	}
+
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	if status != zgrab2.SCAN_APPLICATION_ERROR {
+		t.Errorf("expected SCAN_APPLICATION_ERROR, got %s", status)
+	}
+	if result == nil || !strings.Contains(result.(*ScanResults).StartTLS, "ERROR ") {
+		t.Errorf("expected ERROR in STARTTLS response, got %v", result)
 	}
 }
 

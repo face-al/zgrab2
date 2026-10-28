@@ -11,17 +11,24 @@ import (
 // IRC messages are CRLF-terminated lines of the form
 // [":" prefix SPACE] command [params] (RFC 2812, Section 2.3.1), where command
 // is either a word or a three-digit numeric reply (RFC 2812, Section 2.4).
+// Some servers end lines with a bare LF; like TLS-Attacker, accept both.
+
+// IRC has no end-of-reply marker, and a server may send unrelated lines (e.g.
+// hostname lookup NOTICEs) at any time, also after its reply. So the end
+// regexes match the reply's final line anywhere in the buffer, not only as the
+// last line read, like TLS-Attacker's line-by-line matching.
 
 // capLSEndRegex matches once the server has finished answering CAP LS: the
-// last line read is the final CAP LS line, whose capability list is a ":"
-// trailing parameter (a continuation line carries a "*" before it), an error
-// numeric (4xx/5xx, e.g. 421 from a server without CAP support), or an ERROR
-// message.
-var capLSEndRegex = regexp.MustCompile(`(?:^|\n)(?::\S+ )?(?:CAP \S+ LS :[^\r\n]*|[45]\d\d [^\r\n]*|ERROR [^\r\n]*)\r\n$`)
+// final CAP LS line, whose capability list is a ":" trailing parameter (a
+// continuation line carries a "*" before it), an error numeric (4xx/5xx, e.g.
+// 421 from a server without CAP support), or an ERROR message.
+var capLSEndRegex = regexp.MustCompile(`(?m)^(?::\S+ )?(?:CAP \S+ LS :|[45]\d\d |ERROR )[^\r\n]*\r?\n`)
 
-// numericEndRegex matches once the last line read is a numeric reply or an
-// ERROR message; used for the reply to STARTTLS, which is a numeric (670 or 691).
-var numericEndRegex = regexp.MustCompile(`(?:^|\n)(?::\S+ )?(?:\d\d\d [^\r\n]*|ERROR [^\r\n]*)\r\n$`)
+// startTLSEndRegex matches once the server has answered STARTTLS: 670
+// (RPL_STARTTLS), 691 (ERR_STARTTLS), another error numeric (4xx/5xx), or an
+// ERROR message. Other numerics (e.g. 020) do not end the reply. The code is
+// captured.
+var startTLSEndRegex = regexp.MustCompile(`(?m)^(?::\S+ )?(?:(670|691|[45]\d\d) |ERROR )[^\r\n]*\r?\n`)
 
 const readBufferSize int = 0x10000
 
