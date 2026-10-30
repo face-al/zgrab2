@@ -319,7 +319,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 
 	err = scan.conn.Write(query)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to write buildInfo message to target %s: %w", target.String(), err)
+		return zgrab2.TryGetScanStatus(err), &result, fmt.Errorf("failed to write buildInfo message to target %s: %w", target.String(), err)
 	}
 	msg, err := scan.conn.ReadMsg()
 	if err != nil {
@@ -333,7 +333,10 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 
 	err = bson.Unmarshal(msg[MSGHEADER_LEN+resp_offset:], &result.BuildInfo)
 	if err != nil {
-		return zgrab2.SCAN_PROTOCOL_ERROR, nil, fmt.Errorf("failed to unmarshall buildInfo message from target %s: %w", target.String(), err)
+		// Drop whatever a failed unmarshal left behind, but keep the
+		// isMaster/listDatabases results already gathered.
+		result.BuildInfo = nil
+		return zgrab2.SCAN_PROTOCOL_ERROR, &result, fmt.Errorf("failed to unmarshall buildInfo message from target %s: %w", target.String(), err)
 	}
 	return zgrab2.SCAN_SUCCESS, &result, nil
 }

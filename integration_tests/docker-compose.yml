@@ -452,6 +452,11 @@ services:
   pptp:
     container_name: zgrab_pptp
     image: "mobtitude/vpn-pptp"
+    # The image's entrypoint sets up NAT with legacy iptables, which fails
+    # (and exits) on kernels built without it, e.g. Ubuntu 26 runners. The
+    # scan only needs the PPTP control channel, so run pptpd directly.
+    entrypoint: ["pptpd"]
+    command: ["--fg"]
     networks:
       - pptp-network
     volumes:
@@ -560,6 +565,16 @@ services:
       context: ./ssh/container
     networks:
       - ssh-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
+  sslv2:
+    container_name: "zgrab_sslv2"
+    build:
+      context: ./sslv2
+    networks:
+      - sslv2-network
     hostname: "target"
     depends_on:
       - service_base
@@ -810,6 +825,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.172/30
+  sslv2-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.16/30
   telnet-network:
     driver: bridge
     ipam:
