@@ -17,6 +17,7 @@ imap_scan_response = SubRecord(
                 ),
                 "close": String(doc="The server's response to the CLOSE command."),
                 "tls": zgrab2.tls_log,
+                "sslv2": zgrab2.sslv2_upgrade,
             }
         )
     },
