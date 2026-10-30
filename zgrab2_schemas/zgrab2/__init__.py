@@ -4,6 +4,7 @@ from . import dnp3
 from . import fox
 from . import ftp
 from . import http
+from . import ldap
 from . import managesieve
 from . import memcached
 from . import modbus
@@ -22,6 +23,7 @@ from . import siemens
 from . import smb
 from . import smtp
 from . import ssh
+from . import sslv2
 from . import telnet
 from . import ipp
 from . import banner

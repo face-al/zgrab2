@@ -99,6 +99,45 @@ ntlm_info = SubRecord(
 )
 
 
+# The outcome of one SSL 2.0 CLIENT-HELLO (lib/sslv2).
+sslv2_result = {
+    "server_hello": SubRecord(
+        {
+            "session_id_hit": Unsigned8BitInteger(),
+            "certificate_type": Unsigned8BitInteger(),
+            "version": Unsigned16BitInteger(),
+            "cipher_specs": ListOf(String()),
+            "cipher_specs_raw": String(),
+            "connection_id": String(),
+            "certificate": SubRecord(
+                {
+                    "raw": Binary(),
+                    "parsed": zcrypto.ParsedCertificate(),
+                    "parse_error": String(),
+                }
+            ),
+        }
+    ),
+    "error": SubRecord(
+        {
+            "code": Unsigned16BitInteger(),
+            "name": String(),
+        }
+    ),
+    "header_len": Unsigned8BitInteger(),
+    "raw": String(),
+}
+
+# The SSL 2.0 CLIENT-HELLO sent instead of the TLS handshake after an
+# application-layer upgrade (STARTTLS modules' --sslv2).
+sslv2_upgrade = SubRecord(
+    dict(
+        sslv2_result,
+        status=String(doc="The outcome of the CLIENT-HELLO, also the scan status."),
+    )
+)
+
+
 # Register a schema type for responses with the given name.
 def register_scan_response_type(name, schema):
     scan_response_types[name] = schema
