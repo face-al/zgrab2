@@ -24,6 +24,7 @@ managesieve_scan_response = SubRecord(
                     String(doc="Supported SASL authentication mechanism.")
                 ),
                 "tls": zgrab2.tls_log,
+                "sslv2": zgrab2.sslv2_upgrade,
                 "starttls_response": String(
                     doc="The server's response to the STARTTLS command."
                 ),

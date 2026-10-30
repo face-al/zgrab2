@@ -11,6 +11,7 @@ from . import mongodb
 from . import mssql
 from . import mysql
 from . import mysql_errors
+from . import nntp
 from . import ntp
 from . import omronfins
 from . import oracle
@@ -22,6 +23,7 @@ from . import siemens
 from . import smb
 from . import smtp
 from . import ssh
+from . import sslv2
 from . import telnet
 from . import ipp
 from . import banner

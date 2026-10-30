@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  nntp_service_base:
+    build:
+      context: ./nntp
+    image: "zgrab2_nntp_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -138,6 +145,36 @@ services:
     hostname: "target"
     depends_on:
       - ipp_service_base
+
+  nntp_starttls:
+    build:
+      context: ./nntp/starttls
+    container_name: zgrab_nntp_starttls
+    networks:
+      - nntp-starttls-network
+    hostname: "target"
+    depends_on:
+      - nntp_service_base
+
+  nntp_nntps:
+    build:
+      context: ./nntp/nntps
+    container_name: zgrab_nntp_nntps
+    networks:
+      - nntp-nntps-network
+    hostname: "target"
+    depends_on:
+      - nntp_service_base
+
+  nntp_innd:
+    build:
+      context: ./nntp/innd
+    container_name: zgrab_nntp_innd
+    networks:
+      - nntp-innd-network
+    hostname: "target"
+    depends_on:
+      - nntp_service_base
 
   managesieve:
     image: stalwartlabs/stalwart:latest
@@ -532,6 +569,16 @@ services:
     depends_on:
       - service_base
 
+  sslv2:
+    container_name: "zgrab_sslv2"
+    build:
+      context: ./sslv2
+    networks:
+      - sslv2-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
   telnet:
     container_name: "zgrab_telnet"
     build:
@@ -583,6 +630,21 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.28/30
+  nntp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.224/30
+  nntp-nntps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.228/30
+  nntp-innd-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.232/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:
@@ -763,6 +825,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.172/30
+  sslv2-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.16/30
   telnet-network:
     driver: bridge
     ipam:

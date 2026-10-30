@@ -18,6 +18,7 @@ import (
 	"github.com/zmap/zgrab2/modules/mongodb"
 	"github.com/zmap/zgrab2/modules/mssql"
 	"github.com/zmap/zgrab2/modules/mysql"
+	"github.com/zmap/zgrab2/modules/nntp"
 	"github.com/zmap/zgrab2/modules/ntp"
 	"github.com/zmap/zgrab2/modules/oracle"
 	"github.com/zmap/zgrab2/modules/pcworx"
@@ -28,6 +29,7 @@ import (
 	"github.com/zmap/zgrab2/modules/siemens"
 	"github.com/zmap/zgrab2/modules/smb"
 	"github.com/zmap/zgrab2/modules/smtp"
+	"github.com/zmap/zgrab2/modules/sslv2"
 	"github.com/zmap/zgrab2/modules/telnet"
 )
 
@@ -50,6 +52,7 @@ func init() {
 		"mongodb":   mongodb.NewModule(),
 		"mssql":     mssql.NewModule(),
 		"mysql":     mysql.NewModule(),
+		"nntp":      nntp.NewModule(),
 		"ntp":       ntp.NewModule(),
 		"oracle":    oracle.NewModule(),
 		"pcworx":    pcworx.NewModule(),
@@ -61,6 +64,7 @@ func init() {
 		"smb":       smb.NewModule(),
 		"smtp":      smtp.NewModule(),
 		"ssh":       &modules.SSHModule{},
+		"sslv2":     sslv2.NewModule(),
 		"telnet":    telnet.NewModule(),
 		"tls":       &modules.TLSModule{},
 	}
