@@ -17,6 +17,10 @@
 //
 // The output contains the server's response to CAP LS and to STARTTLS, and
 // if STARTTLS was negotiated or --ircs was set, the standard TLS logs.
+//
+// With --sslv2, after the server accepts STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package irc
 
 import (
@@ -29,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ErrInvalidResponse is returned when the server returns an invalid or unexpected response.
@@ -49,6 +54,10 @@ type ScanResults struct {
 
 	// TLSLog is the standard TLS log, if STARTTLS is sent or if --ircs is used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags holds the command-line configuration for the IRC scan module.
@@ -62,6 +71,9 @@ type Flags struct {
 
 	// IRCSecure indicates that the entire transaction should be wrapped in a TLS session.
 	IRCSecure bool `long:"ircs" description:"Perform a TLS handshake immediately upon connecting."`
+
+	// SSLv2 sends an SSL 2.0 CLIENT-HELLO instead of the TLS handshake after the upgrade.
+	SSLv2 bool `long:"sslv2" description:"After the server accepts STARTTLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -83,6 +95,9 @@ type Scanner struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.SendSTARTTLSOverride && flags.IRCSecure {
 		return errors.New("cannot use --ircs and --send-starttls-override at the same time")
+	}
+	if flags.SSLv2 && flags.IRCSecure {
+		return errors.New("cannot use --ircs and --sslv2 at the same time")
 	}
 	return nil
 }
@@ -265,6 +280,11 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		}
 		if code != rplStartTLS {
 			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("IRC numeric %d returned from STARTTLS command (%s)", code, strings.TrimSpace(ret))
+		}
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, result.SSLv2, err = sslv2.ProbeUpgrade(ircConn.Conn)
+			return status, result, err
 		}
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {
