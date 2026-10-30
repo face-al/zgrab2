@@ -50,6 +50,10 @@
 // stream features and stream error condition (if any), its response to
 // STARTTLS (if sent), and if STARTTLS was negotiated or --xmpps was set, the
 // standard TLS logs.
+//
+// With --sslv2, after the server accepts STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package xmpp
 
 import (
@@ -62,6 +66,7 @@ import (
 	"strings"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ScanResults instances are returned by the module's Scan function.
@@ -90,6 +95,10 @@ type ScanResults struct {
 
 	// TLSLog is the standard TLS log, if STARTTLS is sent or if --xmpps is used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags holds the command-line configuration for the XMPP scan module.
@@ -103,6 +112,9 @@ type Flags struct {
 
 	// XMPPSecure indicates that the entire transaction should be wrapped in a TLS session.
 	XMPPSecure bool `long:"xmpps" description:"Perform a TLS handshake immediately upon connecting (direct TLS)."`
+
+	// SSLv2 sends an SSL 2.0 CLIENT-HELLO instead of the TLS handshake after the upgrade.
+	SSLv2 bool `long:"sslv2" description:"After the server accepts STARTTLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 
 	// XMPPDomain is the domain sent in the 'to' attribute of the stream header; empty falls back to the target domain, then to the target IP address.
 	XMPPDomain string `long:"xmpp-domain" description:"Domain to send in the 'to' attribute of the stream header, and as SNI and certificate name unless --server-name or --no-sni is given (default: target domain, else target IP address)"`
@@ -126,6 +138,9 @@ type Scanner struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.SendSTARTTLSOverride && flags.XMPPSecure {
 		return errors.New("cannot use --xmpps and --send-starttls-override at the same time")
+	}
+	if flags.SSLv2 && flags.XMPPSecure {
+		return errors.New("cannot use --xmpps and --sslv2 at the same time")
 	}
 	return nil
 }
@@ -302,6 +317,11 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		if !proceedRegex.MatchString(ret) {
 			result.StreamError = getStreamError(ret)
 			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("XMPP server for target %s did not proceed with STARTTLS: %s", target.String(), strings.TrimSpace(ret))
+		}
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, result.SSLv2, err = sslv2.ProbeUpgrade(xmppConn.Conn)
+			return status, result, err
 		}
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {

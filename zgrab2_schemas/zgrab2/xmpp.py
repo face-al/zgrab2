@@ -18,6 +18,7 @@ xmpp_scan_response = SubRecord(
                 "starttls": String(),
                 "implicit_tls": Boolean(),
                 "tls": zgrab2.tls_log,
+                "sslv2": zgrab2.sslv2_upgrade,
             }
         )
     },
