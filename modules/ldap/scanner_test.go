@@ -5,7 +5,9 @@ import (
 	"context"
 	stdtls "crypto/tls"
 	"encoding/hex"
+	"io"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/zmap/zgrab2"
@@ -533,4 +535,119 @@ func TestLDAPSNoticeOfDisconnection(t *testing.T) {
 	if result == nil || result.NoticeOfDisconnection == nil || result.TLSLog == nil {
 		t.Errorf("expected Notice of Disconnection and TLS log in result, got %+v", result)
 	}
+}
+
+// scanSSLv2 runs an --sslv2 scan against a fake LDAP server that accepts
+// StartTLS and then hands the connection to fn.
+func scanSSLv2(t *testing.T, fn func(net.Conn)) (zgrab2.ScanStatus, *ScanResults) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	runLDAPPreTLS(t, serverConn, adRootDSE, extendedResponseMessage(2, 0, startTLSOID), 1, fn)
+
+	status, result, _ := scanLDAP(clientConn, &Flags{SSLv2: true}, testhelpers.MakeFailingTLSWrapper())
+	return status, result
+}
+
+func TestSSLv2UpgradeRefused(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	runLDAPPreTLS(t, serverConn, adRootDSE, extendedResponseMessage(2, 2, startTLSOID), 1, func(net.Conn) {})
+
+	status, result, _ := scanLDAP(clientConn, &Flags{SSLv2: true}, testhelpers.MakeFailingTLSWrapper())
+	if status != zgrab2.SCAN_APPLICATION_ERROR {
+		t.Errorf("expected SCAN_APPLICATION_ERROR, got %s", status)
+	}
+	if result == nil || result.SSLv2 != nil {
+		t.Errorf("expected result without sslv2, got %+v", result)
+	}
+}
+
+func TestSSLv2Validate(t *testing.T) {
+	if err := (Flags{LDAPSecure: true, SSLv2: true}).Validate(nil); err == nil {
+		t.Error("expected error for --ldaps with --sslv2")
+	}
+	if err := (Flags{SSLv2: true}).Validate(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// sslv2Server returns the server side of the SSL 2.0 probe: it reads the
+// 48-byte CLIENT-HELLO, checks its header and version, and writes reply.
+func sslv2Server(t *testing.T, reply []byte) func(net.Conn) {
+	return func(conn net.Conn) {
+		hello := make([]byte, 48)
+		if _, err := io.ReadFull(conn, hello); err != nil {
+			t.Errorf("reading CLIENT-HELLO: %v", err)
+
+			return
+		}
+		if !bytes.HasPrefix(hello, []byte{0x80, 0x2e, 0x01}) {
+			t.Errorf("unexpected CLIENT-HELLO prefix %x", hello[:3])
+		}
+		conn.Write(reply)
+	}
+}
+
+func TestSSLv2Upgrade(t *testing.T) {
+	serverHello, err := os.ReadFile("../../lib/sslv2/testdata/openssl-1.0.2u-server-hello.bin")
+	if err != nil {
+		t.Fatalf("reading SERVER-HELLO fixture: %v", err)
+	}
+
+	t.Run("server hello", func(t *testing.T) {
+		status, result := scanSSLv2(t, sslv2Server(t, serverHello))
+		if status != zgrab2.SCAN_SUCCESS {
+			t.Fatalf("expected SCAN_SUCCESS, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_SUCCESS {
+			t.Errorf("expected sslv2 status SCAN_SUCCESS, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result == nil || result.SSLv2.ServerHello == nil {
+			t.Errorf("expected SERVER-HELLO, got %+v", result.SSLv2.Result)
+		}
+		if result.TLSLog != nil {
+			t.Error("expected no TLS log")
+		}
+	})
+
+	t.Run("tls alert", func(t *testing.T) {
+		status, result := scanSSLv2(t, sslv2Server(t, []byte{0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46}))
+		if status != zgrab2.SCAN_PROTOCOL_ERROR {
+			t.Fatalf("expected SCAN_PROTOCOL_ERROR, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_PROTOCOL_ERROR {
+			t.Errorf("expected sslv2 status SCAN_PROTOCOL_ERROR, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result == nil || result.SSLv2.Raw != "15030100020246" {
+			t.Errorf("expected the TLS alert in raw, got %+v", result.SSLv2.Result)
+		}
+		if result.TLSLog != nil {
+			t.Error("expected no TLS log")
+		}
+	})
+
+	t.Run("connection closed", func(t *testing.T) {
+		status, result := scanSSLv2(t, func(conn net.Conn) {
+			// net.Pipe fails the client's write once the server has closed,
+			// unlike TCP: read the CLIENT-HELLO, then close without replying.
+			io.ReadFull(conn, make([]byte, 48))
+		})
+		if status != zgrab2.SCAN_CONNECTION_CLOSED {
+			t.Fatalf("expected SCAN_CONNECTION_CLOSED, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_CONNECTION_CLOSED {
+			t.Errorf("expected sslv2 status SCAN_CONNECTION_CLOSED, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result != nil {
+			t.Errorf("expected no sslv2 reply, got %+v", result.SSLv2.Result)
+		}
+	})
 }
