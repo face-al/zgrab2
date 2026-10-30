@@ -42,6 +42,7 @@ ldap_scan_response = SubRecord(
                 "notice_of_disconnection": ldap_extended_response,
                 "implicit_tls": Boolean(),
                 "tls": zgrab2.tls_log,
+                "sslv2": zgrab2.sslv2_upgrade,
             }
         )
     },
