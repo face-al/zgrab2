@@ -1,3 +1,30 @@
+// Package sslv2 sends an SSL 2.0 CLIENT-HELLO and parses the server's
+// SERVER-HELLO or ERROR (draft-hickman-netscape-ssl-00). It is shared by
+// the sslv2 module (SSL 2.0 on connect) and the STARTTLS modules' --sslv2
+// flag (SSL 2.0 after the application-layer upgrade).
+//
+// The CLIENT-HELLO (section 5.5.1) goes in a record with a 2-byte header
+// (section 4.1): version 0x0002, all seven cipher kinds of Appendix C.4, no
+// session identifier and a random 16-byte challenge. These are the bytes of
+// TLS-Attacker's SSL2 ClientHello. One record and its message are read.
+//
+// A SERVER-HELLO (section 5.6.1) that answers a CLIENT-HELLO without a
+// session identifier is a success: SESSION-ID-HIT 0, certificate type
+// SSL_CT_X509_CERTIFICATE, version 0x0002, a certificate, a cipher spec list
+// of whole specs, a connection identifier of 16 to 32 bytes, and lengths
+// that add up to the record length. The certificate is also parsed as
+// X.509; a parse failure is kept in the results and does not fail the scan.
+//
+// An ERROR message (section 5.7.1) with a known error code is an
+// application error: the server speaks SSL 2.0 but refused the CLIENT-HELLO.
+// A TLS record (e.g. the alert OpenSSL 1.1 and later send), any other
+// message or record, or a record cut short is a protocol error. A connection
+// closed without a reply, as SSL 3.0 and TLS servers without SSL 2.0 support
+// usually do, is reported as connection-closed.
+//
+// The exchange stops after the SERVER-HELLO: no CLIENT-MASTER-KEY is sent,
+// so no keys are exchanged and the server's SERVER-VERIFY is not checked.
+// TLS-Attacker's SSL2 hello workflow likewise ends with the SERVER-HELLO.
 package sslv2
 
 import (
@@ -117,6 +144,77 @@ type Certificate struct {
 
 	// ParseError is the error parsing the certificate, if any.
 	ParseError string `json:"parse_error,omitempty"`
+}
+
+// Result is the outcome of one CLIENT-HELLO.
+type Result struct {
+	// ServerHello is the server's SERVER-HELLO.
+	ServerHello *ServerHello `json:"server_hello,omitempty"`
+
+	// Error is the server's ERROR message.
+	Error *ErrorMessage `json:"error,omitempty"`
+
+	// HeaderLength is the length of the reply's record header, 2 or 3.
+	HeaderLength int `json:"header_len,omitempty"`
+
+	// Raw is the hex encoding of the bytes read from the server, up to 4096.
+	Raw string `json:"raw,omitempty"`
+}
+
+// Probe sends a CLIENT-HELLO on conn and reads the reply. The result is nil
+// if nothing was read.
+func Probe(conn net.Conn) (zgrab2.ScanStatus, *Result, error) {
+	challenge, err := newChallenge()
+	if err != nil {
+		return zgrab2.SCAN_UNKNOWN_ERROR, nil, fmt.Errorf("could not generate challenge: %w", err)
+	}
+	if _, err = conn.Write(clientHello(challenge)); err != nil {
+		return zgrab2.TryGetScanStatus(err), nil, fmt.Errorf("could not send CLIENT-HELLO: %w", err)
+	}
+	sslConn := Connection{Conn: conn}
+	msg, headerLength, err := sslConn.ReadMessage()
+	result := &Result{HeaderLength: headerLength}
+	if raw := sslConn.Raw(); len(raw) > 0 {
+		result.Raw = hex.EncodeToString(raw)
+	}
+	if err != nil {
+		if result.Raw == "" {
+			result = nil
+		}
+		return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not read reply to CLIENT-HELLO: %w", err)
+	}
+
+	if msg[0] == msgError {
+		result.Error, err = ParseError(msg)
+		if err != nil {
+			return zgrab2.TryGetScanStatus(err), result, err
+		}
+		return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("SSL 2.0 ERROR %s (0x%04x) returned from CLIENT-HELLO", result.Error.Name, result.Error.Code)
+	}
+	result.ServerHello, err = ParseServerHello(msg)
+	if err != nil {
+		return zgrab2.TryGetScanStatus(err), result, err
+	}
+	return zgrab2.SCAN_SUCCESS, result, nil
+}
+
+// UpgradeResult is the outcome of a CLIENT-HELLO sent in place of the TLS
+// handshake after an application-layer upgrade (STARTTLS). It is present
+// whenever the CLIENT-HELLO was attempted, so a failure after the upgrade is
+// told apart from one before it.
+type UpgradeResult struct {
+	// Status is the outcome of the CLIENT-HELLO; the module returns it as
+	// its scan status.
+	Status zgrab2.ScanStatus `json:"status"`
+
+	*Result
+}
+
+// ProbeUpgrade runs Probe on conn, the upgraded connection of a STARTTLS
+// module, and wraps its result for the module's sslv2 field.
+func ProbeUpgrade(conn net.Conn) (zgrab2.ScanStatus, *UpgradeResult, error) {
+	status, result, err := Probe(conn)
+	return status, &UpgradeResult{Status: status, Result: result}, err
 }
 
 // ErrorMessage is the server's ERROR message (section 5.7.1).

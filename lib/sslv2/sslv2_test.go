@@ -2,7 +2,6 @@ package sslv2
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/zmap/zgrab2"
-	"github.com/zmap/zgrab2/modules/testhelpers"
 )
 
 // fixture is a SERVER-HELLO record captured from OpenSSL 1.0.2u
@@ -95,19 +93,16 @@ func runServer(serverConn net.Conn, reply []byte, pieces int) <-chan error {
 	return done
 }
 
-func scan(t *testing.T, reply []byte, pieces int) (zgrab2.ScanStatus, *ScanResults, error) {
+func scan(t *testing.T, reply []byte, pieces int) (zgrab2.ScanStatus, *Result, error) {
 	t.Helper()
 	clientConn, serverConn := net.Pipe()
 	srvDone := runServer(serverConn, reply, pieces)
-	scanner := &Scanner{config: &Flags{}}
-	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 443}
-	dialGroup := &zgrab2.DialerGroup{L4Dialer: testhelpers.MakeL4Dialer(clientConn)}
-	status, result, err := scanner.Scan(context.Background(), dialGroup, target)
+	status, result, err := Probe(clientConn)
+	clientConn.Close()
 	if srvErr := <-srvDone; srvErr != nil {
 		t.Errorf("server: %v", srvErr)
 	}
-	sslResult, _ := result.(*ScanResults)
-	return status, sslResult, err
+	return status, result, err
 }
 
 // TestClientHelloBytes checks the CLIENT-HELLO against the bytes of
