@@ -137,6 +137,7 @@ sslv2_upgrade = SubRecord(
     )
 )
 
+
 # Register a schema type for responses with the given name.
 def register_scan_response_type(name, schema):
     scan_response_types[name] = schema
