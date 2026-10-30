@@ -91,6 +91,10 @@ type Flags struct {
 
 	NoHTTP11 bool `long:"no-http1.1" description:"Use HTTP/2 with the initial request. If this connection is over TLS, we'll advertise HTTP/2 in ALPN. If not over TLS, we'll send an HTTP/2 over clear-text (h2c) request, sometimes known as http2 prior knowledge. Setting TLS.NextProtos will take precedence over this flag. Mutually exclusive with --no-http2"`
 	NoHTTP2  bool `long:"no-http2" description:"Use HTTP/1.1 with the initial request. If this connection is over TLS, we'll advertise HTTP/1.1 in ALPN. If not over TLS, we'll use a plain-text HTTP/1.1 request. Setting TLS.NextProtos will take precedence over this flag. Mutually exclusive with --no-http1.1"`
+
+	// StartTLS asks for the RFC 2817 upgrade to TLS in place of the normal
+	// request; see starttls.go.
+	StartTLS bool `long:"starttls" description:"Ask for an RFC 2817 upgrade to TLS: send OPTIONS * with Upgrade: TLS/1.0 in place of the normal request, and on 101 negotiate TLS and read the response to the OPTIONS over it"`
 }
 
 // A Results object is returned by the HTTP module's Scanner.Scan()
@@ -103,6 +107,13 @@ type Results struct {
 	// It contains all redirect response prior to the final response.
 	RedirectResponseChain []*http.Response `json:"redirect_response_chain,omitempty"`
 	NamesToIPs            []RedirectToIP   `json:"redirects_to_resolved_ips,omitempty"`
+
+	// StartTLS is the raw plaintext reply to the upgrading OPTIONS (--starttls).
+	StartTLS string `json:"starttls,omitempty"`
+
+	// TLSLog is the TLS log of the upgraded connection (--starttls), set even
+	// if the handshake fails.
+	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
 }
 
 type RedirectToIP struct {
@@ -145,6 +156,9 @@ func (flags Flags) Validate(_ []string) error {
 	if flags.NoHTTP2 && flags.NoHTTP11 {
 		return errors.New("cannot use both --no-http2 and --no-http1.1. Pick one or neither depending on which version you want to use")
 	}
+	if flags.StartTLS {
+		return flags.validateStartTLS()
+	}
 	return nil
 }
 
@@ -157,6 +171,10 @@ func (flags Flags) Help() string {
 		" - HTTP/2-only over plain-text                 --no-http1.1 - Sends the HTTP/2 connection preface over plain-text TCP, like curl's --http2-prior-knowledge flag",
 		" - HTTP/1.1-only over TLS                      --no-http2 --use-https - Will only advertise http/1.1 support in ALPN header",
 		" - HTTP/2-only over TLS                        --no-http1.1 --use-https - Use --use-https to connect with TLS instead. Using --use-https --no-http1.1 will only advertise HTTP/2 support ",
+		"RFC 2817 upgrade to TLS - --starttls sends \"OPTIONS * HTTP/1.1\" with \"Upgrade: TLS/1.0\" and \"Connection: Upgrade\" and nothing else.",
+		" On \"101 Switching Protocols\" it negotiates TLS on the same connection (no ALPN unless --next-protos, as TLS-Attacker) and reads the response to the OPTIONS over it.",
+		" The plaintext reply is in \"starttls\", the TLS log in \"tls\" and the response over TLS in \"response\". Any other status is an application error.",
+		" --user-agent is not sent; --raw-headers does not apply.",
 	}
 	return strings.Join(lines, "\n")
 }
@@ -529,34 +547,9 @@ func (scan *scan) Grab() *zgrab2.ScanError {
 		}
 	}
 
-	buf := new(bytes.Buffer)
-	maxReadLen := int64(scan.scanner.config.MaxSize) * 1024
-	readLen := maxReadLen
-	if resp.ContentLength >= 0 && resp.ContentLength < maxReadLen {
-		readLen = resp.ContentLength
-	}
-	if n, err := io.CopyN(buf, resp.Body, readLen); err != nil && !strings.Contains(err.Error(), "EOF") {
-		return zgrab2.NewScanError(zgrab2.SCAN_UNKNOWN_ERROR, fmt.Errorf("error populating response body after %d bytes: %w", n, err))
-	}
-
-	encoder, encoding, certain := charset.DetermineEncoding(buf.Bytes(), resp.Header.Get("content-type"))
-
-	bodyText := ""
-	decodedSuccessfully := false
-	decoder := encoder.NewDecoder()
-
-	//"windows-1252" is the default value and will likely not decode correctly
-	if certain || encoding != "windows-1252" {
-		decoded, decErr := decoder.Bytes(buf.Bytes())
-
-		if decErr == nil {
-			bodyText = string(decoded)
-			decodedSuccessfully = true
-		}
-	}
-
-	if !decodedSuccessfully {
-		bodyText = buf.String()
+	buf, bodyText, readLen, scanErr := scan.scanner.readBody(resp)
+	if scanErr != nil {
+		return scanErr
 	}
 
 	// Application-specific logic for retrying HTTP as HTTPS; if condition matches, return protocol error
@@ -582,35 +575,77 @@ func (scan *scan) Grab() *zgrab2.ScanError {
 		}
 	}
 
+	scan.scanner.setBody(resp, buf, bodyText, readLen)
+	return nil
+}
+
+// readBody reads at most --max-size kilobytes of resp's body and decodes it
+// using the charset the response declares or that the content suggests.
+func (scanner *Scanner) readBody(resp *http.Response) (*bytes.Buffer, string, int64, *zgrab2.ScanError) {
+	buf := new(bytes.Buffer)
+	maxReadLen := int64(scanner.config.MaxSize) * 1024
+	readLen := maxReadLen
+	if resp.ContentLength >= 0 && resp.ContentLength < maxReadLen {
+		readLen = resp.ContentLength
+	}
+	if n, err := io.CopyN(buf, resp.Body, readLen); err != nil && !strings.Contains(err.Error(), "EOF") {
+		return nil, "", 0, zgrab2.NewScanError(zgrab2.SCAN_UNKNOWN_ERROR, fmt.Errorf("error populating response body after %d bytes: %w", n, err))
+	}
+
+	encoder, encoding, certain := charset.DetermineEncoding(buf.Bytes(), resp.Header.Get("content-type"))
+
+	bodyText := ""
+	decodedSuccessfully := false
+	decoder := encoder.NewDecoder()
+
+	//"windows-1252" is the default value and will likely not decode correctly
+	if certain || encoding != "windows-1252" {
+		decoded, decErr := decoder.Bytes(buf.Bytes())
+
+		if decErr == nil {
+			bodyText = string(decoded)
+			decodedSuccessfully = true
+		}
+	}
+
+	if !decodedSuccessfully {
+		bodyText = buf.String()
+	}
+
+	return buf, bodyText, readLen, nil
+}
+
+// setBody stores the body read by readBody in resp, with its length and hash
+// as configured.
+func (scanner *Scanner) setBody(resp *http.Response, buf *bytes.Buffer, bodyText string, readLen int64) {
 	// re-enforce readlen
 	if int64(len(bodyText)) > readLen {
-		scan.results.Response.BodyText = bodyText[:int(readLen)]
+		resp.BodyText = bodyText[:int(readLen)]
 	} else {
-		scan.results.Response.BodyText = bodyText
+		resp.BodyText = bodyText
 	}
 
-	if scan.scanner.config.WithBodyLength {
-		scan.results.Response.BodyTextLength = int64(len(scan.results.Response.BodyText))
+	if scanner.config.WithBodyLength {
+		resp.BodyTextLength = int64(len(resp.BodyText))
 	}
 
-	if len(scan.results.Response.BodyText) > 0 {
-		if scan.scanner.decodedHashFn != nil {
-			scan.results.Response.BodyHash = scan.scanner.decodedHashFn([]byte(scan.results.Response.BodyText))
+	if len(resp.BodyText) > 0 {
+		if scanner.decodedHashFn != nil {
+			resp.BodyHash = scanner.decodedHashFn([]byte(resp.BodyText))
 		} else {
 			m := sha256.New()
 			m.Write(buf.Bytes())
-			scan.results.Response.BodySHA256 = m.Sum(nil)
+			resp.BodySHA256 = m.Sum(nil)
 		}
 	}
 
 	// Check if the BodyText is binary, we'll need to base64 encode it
 	// This occurs after length enforcement, since readLen is the size of data read on the wire, not encoded
-	if !utf8.ValidString(scan.results.Response.BodyText) {
+	if !utf8.ValidString(resp.BodyText) {
 		// body isn't valid UTF-8, so we need to base64 encode it
 		// without this, binary data gets set as
-		scan.results.Response.BodyText = base64.StdEncoding.EncodeToString([]byte(scan.results.Response.BodyText))
+		resp.BodyText = base64.StdEncoding.EncodeToString([]byte(resp.BodyText))
 	}
-	return nil
 }
 
 // shouldRetryOverHTTPS decides whether a failed plaintext-HTTP scan should be
@@ -642,6 +677,9 @@ func (scanner *Scanner) shouldRetryOverHTTPS(err *zgrab2.ScanError) bool {
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	if dialGroup == nil || dialGroup.L4Dialer == nil || dialGroup.TLSWrapper == nil {
 		return zgrab2.SCAN_INVALID_INPUTS, nil, errors.New("must specify a dialer group with L4 dialer and TLS wrapper")
+	}
+	if scanner.config.StartTLS {
+		return scanner.scanStartTLS(ctx, dialGroup, target)
 	}
 	scan := scanner.newHTTPScan(ctx, target, scanner.config.UseHTTPS, dialGroup)
 	defer scan.Cleanup()
