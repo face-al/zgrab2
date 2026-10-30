@@ -13,6 +13,7 @@ import (
 	"github.com/zmap/zgrab2/modules/http"
 	"github.com/zmap/zgrab2/modules/imap"
 	"github.com/zmap/zgrab2/modules/ipp"
+	"github.com/zmap/zgrab2/modules/irc"
 	"github.com/zmap/zgrab2/modules/memcached"
 	"github.com/zmap/zgrab2/modules/modbus"
 	"github.com/zmap/zgrab2/modules/mongodb"
@@ -28,6 +29,7 @@ import (
 	"github.com/zmap/zgrab2/modules/siemens"
 	"github.com/zmap/zgrab2/modules/smb"
 	"github.com/zmap/zgrab2/modules/smtp"
+	"github.com/zmap/zgrab2/modules/sslv2"
 	"github.com/zmap/zgrab2/modules/telnet"
 )
 
@@ -45,6 +47,7 @@ func init() {
 		"http":      http.NewModule(),
 		"imap":      imap.NewModule(),
 		"ipp":       ipp.NewModule(),
+		"irc":       irc.NewModule(),
 		"memcached": memcached.NewModule(),
 		"modbus":    modbus.NewModule(),
 		"mongodb":   mongodb.NewModule(),
@@ -61,6 +64,7 @@ func init() {
 		"smb":       smb.NewModule(),
 		"smtp":      smtp.NewModule(),
 		"ssh":       &modules.SSHModule{},
+		"sslv2":     sslv2.NewModule(),
 		"telnet":    telnet.NewModule(),
 		"tls":       &modules.TLSModule{},
 	}
