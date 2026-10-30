@@ -186,6 +186,9 @@ http_scan_response = SubRecord(
                 "response": http_response_full,
                 "redirect_response_chain": ListOf(http_response_full),
                 "redirects_to_resolved_ips": ListOf(redirects_to_resolved_ip),
+                # --starttls: plaintext reply to the upgrading OPTIONS, and the TLS log
+                "starttls": String(),
+                "tls": zgrab2.tls_log,
             }
         )
     },
