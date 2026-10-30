@@ -44,6 +44,13 @@ services:
     depends_on:
         - service_base
 
+  xmpp_service_base:
+    build:
+      context: ./xmpp
+    image: "zgrab2_xmpp_service_base:latest"
+    depends_on:
+      - service_base
+
   # Modules Start
   amqp091-3.12.14:
     image: "rabbitmq:3.12.14"
@@ -532,6 +539,16 @@ services:
     depends_on:
       - service_base
 
+  sslv2:
+    container_name: "zgrab_sslv2"
+    build:
+      context: ./sslv2
+    networks:
+      - sslv2-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
   telnet:
     container_name: "zgrab_telnet"
     build:
@@ -548,6 +565,46 @@ services:
       context: ./telnet/tls-container
     networks:
         - telnet-tls-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
+  xmpp_starttls:
+    build:
+      context: ./xmpp/starttls
+    container_name: zgrab_xmpp_starttls
+    networks:
+      - xmpp-starttls-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_no_starttls:
+    build:
+      context: ./xmpp/no-starttls
+    container_name: zgrab_xmpp_no_starttls
+    networks:
+      - xmpp-no-starttls-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_xmpps:
+    build:
+      context: ./xmpp/xmpps
+    container_name: zgrab_xmpp_xmpps
+    networks:
+      - xmpp-xmpps-network
+    hostname: "target"
+    depends_on:
+      - xmpp_service_base
+
+  xmpp_ejabberd:
+    build:
+      context: ./xmpp/ejabberd
+    container_name: zgrab_xmpp_ejabberd
+    networks:
+      - xmpp-ejabberd-network
     hostname: "target"
     depends_on:
       - service_base
@@ -763,6 +820,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.172/30
+  sslv2-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.16/30
   telnet-network:
     driver: bridge
     ipam:
@@ -793,3 +855,23 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.192/30
+  xmpp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.0/30
+  xmpp-no-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.4/30
+  xmpp-xmpps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.8/30
+  xmpp-ejabberd-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.12/30
