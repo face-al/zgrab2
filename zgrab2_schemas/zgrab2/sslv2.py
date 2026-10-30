@@ -4,40 +4,11 @@ from zschema.leaves import *
 from zschema.compounds import *
 import zschema.registry
 
-import zcrypto_schemas.zcrypto as zcrypto
 from . import zgrab2
 
 sslv2_scan_response = SubRecord(
     {
-        "result": SubRecord(
-            {
-                "server_hello": SubRecord(
-                    {
-                        "session_id_hit": Unsigned8BitInteger(),
-                        "certificate_type": Unsigned8BitInteger(),
-                        "version": Unsigned16BitInteger(),
-                        "cipher_specs": ListOf(String()),
-                        "cipher_specs_raw": String(),
-                        "connection_id": String(),
-                        "certificate": SubRecord(
-                            {
-                                "raw": Binary(),
-                                "parsed": zcrypto.ParsedCertificate(),
-                                "parse_error": String(),
-                            }
-                        ),
-                    }
-                ),
-                "error": SubRecord(
-                    {
-                        "code": Unsigned16BitInteger(),
-                        "name": String(),
-                    }
-                ),
-                "header_len": Unsigned8BitInteger(),
-                "raw": String(),
-            }
-        )
+        "result": SubRecord(zgrab2.sslv2_result)
     },
     extends=zgrab2.base_scan_response,
 )
