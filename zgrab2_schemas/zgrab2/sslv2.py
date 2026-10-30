@@ -7,9 +7,7 @@ import zschema.registry
 from . import zgrab2
 
 sslv2_scan_response = SubRecord(
-    {
-        "result": SubRecord(zgrab2.sslv2_result)
-    },
+    {"result": SubRecord(zgrab2.sslv2_result)},
     extends=zgrab2.base_scan_response,
 )
 
