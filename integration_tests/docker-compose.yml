@@ -532,6 +532,16 @@ services:
     depends_on:
       - service_base
 
+  sslv2:
+    container_name: "zgrab_sslv2"
+    build:
+      context: ./sslv2
+    networks:
+      - sslv2-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
   telnet:
     container_name: "zgrab_telnet"
     build:
@@ -763,6 +773,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.172/30
+  sslv2-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.16/30
   telnet-network:
     driver: bridge
     ipam:
