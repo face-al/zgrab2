@@ -28,6 +28,7 @@ import (
 	"github.com/zmap/zgrab2/modules/siemens"
 	"github.com/zmap/zgrab2/modules/smb"
 	"github.com/zmap/zgrab2/modules/smtp"
+	"github.com/zmap/zgrab2/modules/sslv2"
 	"github.com/zmap/zgrab2/modules/telnet"
 	"github.com/zmap/zgrab2/modules/xmpp"
 )
@@ -62,6 +63,7 @@ func init() {
 		"smb":       smb.NewModule(),
 		"smtp":      smtp.NewModule(),
 		"ssh":       &modules.SSHModule{},
+		"sslv2":     sslv2.NewModule(),
 		"telnet":    telnet.NewModule(),
 		"tls":       &modules.TLSModule{},
 		"xmpp":      xmpp.NewModule(),

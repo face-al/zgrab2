@@ -23,6 +23,10 @@
 //
 // The output contains the banner and the responses to any commands that
 // were sent, and if or --pop3s --starttls were set, the standard TLS logs.
+//
+// With --sslv2, after the server accepts STLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package pop3
 
 import (
@@ -36,6 +40,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ScanResults instances are returned by the module's Scan function.
@@ -57,6 +62,10 @@ type ScanResults struct {
 
 	// TLSLog is the standard TLS log, if --starttls or --pop3s is enabled.
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags holds the command-line configuration for the POP3 scan module.
@@ -79,6 +88,9 @@ type Flags struct {
 
 	// StartTLS indicates that the client should attempt to update the connection to TLS.
 	StartTLS bool `long:"starttls" description:"Send STLS before negotiating"`
+
+	// SSLv2 sends an SSL 2.0 CLIENT-HELLO instead of the TLS handshake after the upgrade.
+	SSLv2 bool `long:"sslv2" description:"After the server accepts STLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -99,6 +111,10 @@ type Scanner struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.StartTLS && flags.POP3Secure {
 		log.Error("Cannot send both --starttls and --pop3s")
+		return zgrab2.ErrInvalidArguments
+	}
+	if flags.SSLv2 && !flags.StartTLS {
+		log.Error("--sslv2 requires --starttls")
 		return zgrab2.ErrInvalidArguments
 	}
 	return nil
@@ -222,6 +238,11 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		result.StartTLS = ret
 		if err = getPOP3Error(ret); err != nil {
 			return zgrab2.TryGetScanStatus(err), result, err
+		}
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, result.SSLv2, err = sslv2.ProbeUpgrade(conn.Conn)
+			return status, result, err
 		}
 		var tlsConn *zgrab2.TLSConnection
 		tlsConn, err = tlsWrapper(ctx, target, conn.Conn)

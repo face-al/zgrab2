@@ -22,6 +22,7 @@ from . import siemens
 from . import smb
 from . import smtp
 from . import ssh
+from . import sslv2
 from . import telnet
 from . import xmpp
 from . import ipp
