@@ -31,6 +31,10 @@
 // The output contains the server's greeting and its responses to CAPABILITIES,
 // MODE READER and the second CAPABILITIES (if sent) and to STARTTLS, and if
 // STARTTLS was negotiated or --nntps was set, the standard TLS logs.
+//
+// With --sslv2, after the server accepts STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package nntp
 
 import (
@@ -43,6 +47,7 @@ import (
 	"strings"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ErrInvalidResponse is returned when the server returns an invalid or unexpected response.
@@ -73,6 +78,10 @@ type ScanResults struct {
 
 	// TLSLog is the standard TLS log, if STARTTLS is sent or if --nntps is used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags holds the command-line configuration for the NNTP scan module.
@@ -86,6 +95,9 @@ type Flags struct {
 
 	// NNTPSecure indicates that the entire transaction should be wrapped in a TLS session.
 	NNTPSecure bool `long:"nntps" description:"Perform a TLS handshake immediately upon connecting."`
+
+	// SSLv2 sends an SSL 2.0 CLIENT-HELLO instead of the TLS handshake after the upgrade.
+	SSLv2 bool `long:"sslv2" description:"After the server accepts STARTTLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -108,6 +120,9 @@ type Scanner struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.SendSTARTTLSOverride && flags.NNTPSecure {
 		return errors.New("cannot use --nntps and --send-starttls-override at the same time")
+	}
+	if flags.SSLv2 && flags.NNTPSecure {
+		return errors.New("cannot use --nntps and --sslv2 at the same time")
 	}
 	return nil
 }
@@ -316,6 +331,11 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		// would have a client treat any other 3xx as "OK so far".
 		if code != codeContinueWithTLS {
 			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("NNTP code %d returned from STARTTLS command (%s)", code, strings.TrimSpace(ret))
+		}
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, result.SSLv2, err = sslv2.ProbeUpgrade(nntpConn.Conn)
+			return status, result, err
 		}
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {
