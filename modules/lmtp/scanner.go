@@ -37,6 +37,10 @@
 // The output contains the server's greeting, its responses to LHLO and
 // STARTTLS (if sent), and if STARTTLS was negotiated or --lmtps was set, the
 // standard TLS logs.
+//
+// With --sslv2, after the server accepts STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package lmtp
 
 import (
@@ -49,6 +53,7 @@ import (
 	"strings"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ErrInvalidResponse is returned when the server returns an invalid or unexpected response.
@@ -71,6 +76,10 @@ type ScanResults struct {
 
 	// TLSLog is the standard TLS log, if STARTTLS is sent or if --lmtps is used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags holds the command-line configuration for the LMTP scan module.
@@ -84,6 +93,9 @@ type Flags struct {
 
 	// LMTPSecure indicates that the entire transaction should be wrapped in a TLS session.
 	LMTPSecure bool `long:"lmtps" description:"Perform a TLS handshake immediately upon connecting."`
+
+	// SSLv2 sends an SSL 2.0 CLIENT-HELLO instead of the TLS handshake after the upgrade.
+	SSLv2 bool `long:"sslv2" description:"After the server accepts STARTTLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 
 	// LHLODomain is the client domain sent with LHLO; empty falls back to the target domain, then to our IP address literal.
 	LHLODomain string `long:"lhlo-domain" description:"Client domain to send with the LHLO command (default: target domain, else our IP address literal)"`
@@ -107,6 +119,9 @@ type Scanner struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.SendSTARTTLSOverride && flags.LMTPSecure {
 		return errors.New("cannot use --lmtps and --send-starttls-override at the same time")
+	}
+	if flags.SSLv2 && flags.LMTPSecure {
+		return errors.New("cannot use --lmtps and --sslv2 at the same time")
 	}
 	return nil
 }
@@ -289,6 +304,11 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		// (RFC 3207, Section 4).
 		if code != codeServiceReady {
 			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("LMTP code %d returned from STARTTLS command (%s)", code, strings.TrimSpace(ret))
+		}
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, result.SSLv2, err = sslv2.ProbeUpgrade(lmtpConn.Conn)
+			return status, result, err
 		}
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {
