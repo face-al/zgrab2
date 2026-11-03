@@ -92,6 +92,7 @@ func TestValidateStartTLS(t *testing.T) {
 		"retry-https":    {func(f *Flags) { f.RetryHTTPS = true }, false},
 		"no-http1.1":     {func(f *Flags) { f.NoHTTP11 = true }, false},
 		"max-redirects":  {func(f *Flags) { f.MaxRedirects = 1 }, false},
+		"retry root":     {func(f *Flags) { f.StartTLSRetryRoot = true }, true},
 		"method":         {func(f *Flags) { f.Method = "HEAD" }, false},
 		"endpoint":       {func(f *Flags) { f.Endpoint = "/x" }, false},
 		"request body":   {func(f *Flags) { f.RequestBody = "x" }, false},
@@ -267,6 +268,105 @@ func TestScanStartTLS(t *testing.T) {
 			}
 			if code != test.Code {
 				t.Errorf("response code = %d, wanted %d", code, test.Code)
+			}
+		})
+	}
+}
+
+// TestScanStartTLSRetryRoot: --starttls-retry-root asks with OPTIONS / on a
+// second connection after OPTIONS * is refused (httpd mod_ssl), and only then.
+func TestScanStartTLSRetryRoot(t *testing.T) {
+	cert := testhelpers.GenerateTestCert(t)
+	const refused = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	request := func(target string) string {
+		return "OPTIONS " + target + " HTTP/1.1\r\nHost: 192.0.2.1\r\nUpgrade: TLS/1.0\r\nConnection: Upgrade\r\n\r\n"
+	}
+	expect := func(conn net.Conn, want string) bool {
+		got := make([]byte, len(want))
+		if _, err := io.ReadFull(conn, got); err != nil || string(got) != want {
+			t.Errorf("request = %q, %v, wanted %q", got, err, want)
+			conn.Close()
+			return false
+		}
+		return true
+	}
+	upgrade := func(conn net.Conn) {
+		conn.Write([]byte(testSwitching))
+		done := testhelpers.RunTLSServer(t, conn, cert, func(srv *stdtls.Conn) {
+			srv.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		})
+		if err := <-done; err != nil {
+			t.Errorf("TLS server: %v", err)
+		}
+	}
+	refuse := func(conn net.Conn) {
+		conn.Write([]byte(refused))
+		io.Copy(io.Discard, conn)
+	}
+
+	testTable := map[string]struct {
+		Retry    bool
+		Second   func(net.Conn) // nil: no second connection expected
+		Status   zgrab2.ScanStatus
+		StartTLS string
+		Star     string
+		Target   string
+	}{
+		"root upgrades":    {true, upgrade, zgrab2.SCAN_SUCCESS, testSwitching, refused, "/"},
+		"root refused too": {true, refuse, zgrab2.SCAN_APPLICATION_ERROR, refused, refused, "/"},
+		"retry off":        {false, nil, zgrab2.SCAN_APPLICATION_ERROR, refused, "", ""},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			var conns []net.Conn
+			first, firstServer := net.Pipe()
+			defer firstServer.Close()
+			conns = append(conns, first)
+			go func() {
+				if expect(firstServer, request("*")) {
+					refuse(firstServer)
+				}
+			}()
+			if test.Second != nil {
+				second, secondServer := net.Pipe()
+				defer secondServer.Close()
+				conns = append(conns, second)
+				go func() {
+					if expect(secondServer, request("/")) {
+						test.Second(secondServer)
+					}
+				}()
+			}
+			dials := 0
+			dialer := func(*zgrab2.ScanTarget) func(context.Context, string, string) (net.Conn, error) {
+				return func(context.Context, string, string) (net.Conn, error) {
+					dials++
+					if dials > len(conns) {
+						t.Fatalf("dial %d, wanted at most %d", dials, len(conns))
+					}
+					return conns[dials-1], nil
+				}
+			}
+			scanner := &Scanner{}
+			if err := scanner.Init(&Flags{StartTLS: true, StartTLSRetryRoot: test.Retry, Method: "GET", Endpoint: "/", MaxSize: 256}); err != nil {
+				t.Fatalf("Init: %v", err)
+			}
+			dialGroup := &zgrab2.DialerGroup{L4Dialer: dialer, TLSWrapper: testhelpers.MakeInsecureTLSWrapper()}
+			status, result, _ := scanner.Scan(context.Background(), dialGroup, &zgrab2.ScanTarget{IP: net.ParseIP("192.0.2.1"), Port: 80})
+			results, _ := result.(*Results)
+			if status != test.Status {
+				t.Fatalf("status = %s, wanted %s", status, test.Status)
+			}
+			if results.StartTLS != test.StartTLS || results.StartTLSStar != test.Star || results.UpgradeTarget != test.Target {
+				t.Errorf("starttls, starttls_star, upgrade_target = %q, %q, %q, wanted %q, %q, %q",
+					results.StartTLS, results.StartTLSStar, results.UpgradeTarget, test.StartTLS, test.Star, test.Target)
+			}
+			if dials != len(conns) {
+				t.Errorf("dials = %d, wanted %d", dials, len(conns))
+			}
+			if test.Status == zgrab2.SCAN_SUCCESS && (results.Response == nil || results.TLSLog == nil) {
+				t.Error("no response or TLS log after the upgrade")
 			}
 		})
 	}

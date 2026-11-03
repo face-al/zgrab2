@@ -28,14 +28,21 @@ import (
 // Section 3.1) or 426 asking for another token (Section 4.2); TLS-Attacker
 // does not retry those either.
 //
+// --starttls-retry-root deviates on purpose: after a refusal with an HTTP
+// status it asks once more, on a new connection, with OPTIONS / and the same
+// headers (RFC 2817, Section 3.2 allows the Upgrade on any request). Apache
+// httpd's mod_ssl (SSLEngine optional) answers OPTIONS * with 200 but
+// upgrades OPTIONS / and GET / (httpd 2.2.34, e2e 2026-11-03).
+//
 // The request and both reply patterns are TLS-Attacker's (StarttlsType.HTTP),
 // so the two tools count the same hosts as upgrading. One deviation: an IPv6
 // Host is bracketed, as RFC 9110, Section 7.2 requires; TLS-Attacker sends it
 // bare, which strict servers answer with 400. Like TLS-Attacker, the Host has
 // no port, also on non-default ports, and no ALPN is offered by default.
 
-// upgradeRequest is TLS-Attacker's OPTIONS_UPGRADE; %s is the Host.
-const upgradeRequest = "OPTIONS * HTTP/1.1\r\nHost: %s\r\nUpgrade: TLS/1.0\r\nConnection: Upgrade\r\n\r\n"
+// upgradeRequest is TLS-Attacker's OPTIONS_UPGRADE with the request-target
+// as the first %s ("*"; "/" for --starttls-retry-root); the second is the Host.
+const upgradeRequest = "OPTIONS %s HTTP/1.1\r\nHost: %s\r\nUpgrade: TLS/1.0\r\nConnection: Upgrade\r\n\r\n"
 
 // upgradeReadSize bounds the plaintext reply head.
 const upgradeReadSize = 0x10000
@@ -89,6 +96,25 @@ func (flags Flags) validateStartTLS() error {
 	return nil
 }
 
+// scanStartTLS asks for the upgrade with OPTIONS * and, with
+// --starttls-retry-root, once more with OPTIONS / if * was refused.
+func (scanner *Scanner) scanStartTLS(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
+	status, result, err := scanner.upgrade(ctx, dialGroup, target, "*")
+	if scanner.config.StartTLSRetryRoot && status == zgrab2.SCAN_APPLICATION_ERROR {
+		star := result.StartTLS
+		status, result, err = scanner.upgrade(ctx, dialGroup, target, "/")
+		if result == nil {
+			result = &Results{}
+		}
+		result.StartTLSStar = star
+		result.UpgradeTarget = "/"
+	}
+	if result == nil {
+		return status, nil, err
+	}
+	return status, result, err
+}
+
 // upgradeHost is the Host of the upgrading request: the target's name, else
 // its IP address, without port.
 func upgradeHost(target *zgrab2.ScanTarget) string {
@@ -102,9 +128,11 @@ func upgradeHost(target *zgrab2.ScanTarget) string {
 	return host
 }
 
-// scanStartTLS asks for the upgrade, negotiates TLS on 101 and reads the
-// response to the OPTIONS over TLS into Results.Response.
-func (scanner *Scanner) scanStartTLS(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
+// upgrade asks for the upgrade with OPTIONS requestTarget on a new
+// connection, negotiates TLS on 101 and reads the response to the OPTIONS
+// over TLS into Results.Response. SCAN_APPLICATION_ERROR = refused with an
+// HTTP status.
+func (scanner *Scanner) upgrade(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget, requestTarget string) (zgrab2.ScanStatus, *Results, error) {
 	conn, err := dialGroup.L4Dialer(target)(ctx, "tcp", net.JoinHostPort(target.Host(), strconv.Itoa(int(target.Port))))
 	if err != nil {
 		return zgrab2.TryGetScanStatus(err), nil, err
@@ -113,7 +141,7 @@ func (scanner *Scanner) scanStartTLS(ctx context.Context, dialGroup *zgrab2.Dial
 	result := &Results{}
 
 	host := upgradeHost(target)
-	if _, err = fmt.Fprintf(conn, upgradeRequest, host); err != nil {
+	if _, err = fmt.Fprintf(conn, upgradeRequest, requestTarget, host); err != nil {
 		return zgrab2.TryGetScanStatus(err), nil, fmt.Errorf("could not send upgrade request: %w", err)
 	}
 	buf := make([]byte, upgradeReadSize)
@@ -148,7 +176,7 @@ func (scanner *Scanner) scanStartTLS(ctx context.Context, dialGroup *zgrab2.Dial
 
 	req := &http.Request{
 		Method:     "OPTIONS",
-		URL:        &url.URL{Opaque: "*"},
+		URL:        &url.URL{Opaque: requestTarget},
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
@@ -175,7 +203,7 @@ func (scanner *Scanner) scanStartTLS(ctx context.Context, dialGroup *zgrab2.Dial
 	}
 	bodyBuf, bodyText, readLen, scanErr := scanner.readBody(resp)
 	if scanErr != nil {
-		return scanErr.Unpack(result)
+		return scanErr.Status, result, scanErr.Err
 	}
 	scanner.setBody(resp, bodyBuf, bodyText, readLen)
 	return zgrab2.SCAN_SUCCESS, result, nil

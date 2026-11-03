@@ -95,6 +95,10 @@ type Flags struct {
 	// StartTLS asks for the RFC 2817 upgrade to TLS in place of the normal
 	// request; see starttls.go.
 	StartTLS bool `long:"starttls" description:"Ask for an RFC 2817 upgrade to TLS: send OPTIONS * with Upgrade: TLS/1.0 in place of the normal request, and on 101 negotiate TLS and read the response to the OPTIONS over it"`
+
+	// StartTLSRetryRoot asks once more with OPTIONS / when OPTIONS * is
+	// refused; see starttls.go.
+	StartTLSRetryRoot bool `long:"starttls-retry-root" description:"With --starttls: if the server answers OPTIONS * with a status other than 101, ask once more on a new connection with OPTIONS / and the same headers (Apache httpd mod_ssl upgrades only requests for a path)"`
 }
 
 // A Results object is returned by the HTTP module's Scanner.Scan()
@@ -110,6 +114,12 @@ type Results struct {
 
 	// StartTLS is the raw plaintext reply to the upgrading OPTIONS (--starttls).
 	StartTLS string `json:"starttls,omitempty"`
+
+	// StartTLSStar is the refused reply to OPTIONS * when
+	// --starttls-retry-root asked again; StartTLS then holds the reply to
+	// OPTIONS / and UpgradeTarget is "/".
+	StartTLSStar  string `json:"starttls_star,omitempty"`
+	UpgradeTarget string `json:"upgrade_target,omitempty"`
 
 	// TLSLog is the TLS log of the upgraded connection (--starttls), set even
 	// if the handshake fails.
@@ -155,6 +165,9 @@ type scan struct {
 func (flags Flags) Validate(_ []string) error {
 	if flags.NoHTTP2 && flags.NoHTTP11 {
 		return errors.New("cannot use both --no-http2 and --no-http1.1. Pick one or neither depending on which version you want to use")
+	}
+	if flags.StartTLSRetryRoot && !flags.StartTLS {
+		return errors.New("--starttls-retry-root needs --starttls")
 	}
 	if flags.StartTLS {
 		return flags.validateStartTLS()
