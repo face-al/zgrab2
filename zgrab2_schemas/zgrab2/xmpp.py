@@ -18,6 +18,9 @@ xmpp_scan_response = SubRecord(
                 "starttls": String(),
                 "implicit_tls": Boolean(),
                 "tls": zgrab2.tls_log,
+                "domain": String(),
+                "domain_source": String(),
+                "host_unknown": ListOf(String()),
             }
         )
     },

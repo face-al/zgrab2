@@ -3,8 +3,12 @@ package xmpp
 import (
 	"context"
 	stdtls "crypto/tls"
+	"errors"
 	"io"
 	"net"
+	"reflect"
+	"regexp"
+	"sync"
 	"testing"
 
 	"github.com/zmap/zgrab2"
@@ -538,5 +542,118 @@ func TestValidate(t *testing.T) {
 	}
 	if err := (Flags{XMPPSecure: true}).Validate(nil); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// domainServer answers each connection's opening stream header like a server
+// that serves only domain: with features listing STARTTLS, else with
+// host-unknown and a stream header 'from' of from (the 'to' it got if from
+// is ""). It returns a dialer handing out one such connection per dial, and
+// the 'to' of every opening it got, in order.
+func domainServer(t *testing.T, domain, from string) (func(*zgrab2.ScanTarget) func(context.Context, string, string) (net.Conn, error), func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var tos []string
+	toRegex := regexp.MustCompile(`to='([^']*)'`)
+	dialer := func(*zgrab2.ScanTarget) func(context.Context, string, string) (net.Conn, error) {
+		return func(context.Context, string, string) (net.Conn, error) {
+			clientConn, serverConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				buf := make([]byte, 512)
+				n, _ := serverConn.Read(buf)
+				to := ""
+				if m := toRegex.FindSubmatch(buf[:n]); m != nil {
+					to = string(m[1])
+				}
+				mu.Lock()
+				tos = append(tos, to)
+				mu.Unlock()
+				if to == domain {
+					serverConn.Write([]byte(testHeader + "<stream:features/>"))
+					return
+				}
+				f := from
+				if f == "" {
+					f = to
+				}
+				serverConn.Write([]byte("<?xml version='1.0'?><stream:stream from='" + f + "' id='1' version='1.0'" +
+					" xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>" +
+					"<stream:error><host-unknown xmlns='urn:ietf:params:xml:ns:xmpp-streams'/></stream:error></stream:stream>"))
+			}()
+			return clientConn, nil
+		}
+	}
+	return dialer, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), tos...)
+	}
+}
+
+func TestXMPPRetryDomain(t *testing.T) {
+	testTable := map[string]struct {
+		Retry       bool
+		Serves      string
+		From        string
+		RDNS        []string
+		Status      zgrab2.ScanStatus
+		Tos         []string
+		Domain      string
+		Source      string
+		HostUnknown []string
+	}{
+		"off":            {false, "localhost", "localhost", nil, zgrab2.SCAN_APPLICATION_ERROR, []string{"127.0.0.1"}, "127.0.0.1", DomainIP, nil},
+		"stream from":    {true, "localhost", "localhost", nil, zgrab2.SCAN_SUCCESS, []string{"127.0.0.1", "localhost"}, "localhost", DomainStreamFrom, []string{"127.0.0.1"}},
+		"reverse dns":    {true, "chat.example.org", "", []string{"chat.example.org."}, zgrab2.SCAN_SUCCESS, []string{"127.0.0.1", "chat.example.org"}, "chat.example.org", DomainReverseDNS, []string{"127.0.0.1"}},
+		"from then rdns": {true, "chat.example.org", "localhost", []string{"chat.example.org."}, zgrab2.SCAN_SUCCESS, []string{"127.0.0.1", "localhost", "chat.example.org"}, "chat.example.org", DomainReverseDNS, []string{"127.0.0.1", "localhost"}},
+		"no rdns echo":   {true, "chat.example.org", "", nil, zgrab2.SCAN_APPLICATION_ERROR, []string{"127.0.0.1"}, "127.0.0.1", DomainIP, []string{"127.0.0.1"}},
+		"nothing serves": {true, "", "localhost", []string{"localhost.", "LOCALHOST", "other.example."}, zgrab2.SCAN_APPLICATION_ERROR, []string{"127.0.0.1", "localhost", "other.example"}, "other.example", DomainReverseDNS, []string{"127.0.0.1", "localhost", "other.example"}},
+	}
+
+	for name, test := range testTable {
+		t.Run(name, func(t *testing.T) {
+			dialer, tos := domainServer(t, test.Serves, test.From)
+			scanner := &Scanner{config: &Flags{RetryDomain: test.Retry}, lookupAddr: func(context.Context, string) ([]string, error) {
+				if test.RDNS == nil {
+					return nil, errors.New("no PTR")
+				}
+				return test.RDNS, nil
+			}}
+			target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 5222}
+			status, result, err := scanner.Scan(context.Background(), &zgrab2.DialerGroup{L4Dialer: dialer, TLSWrapper: testhelpers.MakeFailingTLSWrapper()}, target)
+			if status != test.Status {
+				t.Fatalf("expected %s, got %s (%v)", test.Status, status, err)
+			}
+			if got := tos(); !reflect.DeepEqual(got, test.Tos) {
+				t.Errorf("expected 'to's %q, got %q", test.Tos, got)
+			}
+			r := result.(*ScanResults)
+			if r.Domain != test.Domain || r.DomainSource != test.Source || !reflect.DeepEqual(r.HostUnknown, test.HostUnknown) {
+				t.Errorf("expected domain %q from %q, host-unknown %q; got %q from %q, %q", test.Domain, test.Source, test.HostUnknown, r.Domain, r.DomainSource, r.HostUnknown)
+			}
+			if target.Domain != "" {
+				t.Errorf("target changed: %q", target.Domain)
+			}
+		})
+	}
+}
+
+func TestXMPPRetrySNI(t *testing.T) {
+	// The retry's target, which the TLS wrapper also gets, carries the
+	// retried domain, so it is the SNI (tls.go uses target.Domain).
+	dialer, _ := domainServer(t, "localhost", "localhost")
+	var domains []string
+	recording := func(target *zgrab2.ScanTarget) func(context.Context, string, string) (net.Conn, error) {
+		domains = append(domains, target.Domain)
+		return dialer(target)
+	}
+	scanner := &Scanner{config: &Flags{RetryDomain: true}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 5222}
+	if status, _, err := scanner.Scan(context.Background(), &zgrab2.DialerGroup{L4Dialer: recording, TLSWrapper: testhelpers.MakeFailingTLSWrapper()}, target); status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("expected SCAN_SUCCESS, got %s (%v)", status, err)
+	}
+	if expected := []string{"", "localhost"}; !reflect.DeepEqual(domains, expected) {
+		t.Errorf("expected target domains %q, got %q", expected, domains)
 	}
 }
