@@ -99,7 +99,28 @@ type ScanResults struct {
 	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
 	// handshake, if --sslv2 is used.
 	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
+
+	// Domain is the domain sent in the 'to' attribute of the stream header
+	// of the connection reported here.
+	Domain string `json:"domain,omitempty"`
+
+	// DomainSource is where Domain came from: flag, target, ip, stream-from
+	// or reverse-dns.
+	DomainSource string `json:"domain_source,omitempty"`
+
+	// HostUnknown lists, in order, every domain answered with host-unknown,
+	// with --retry-domain.
+	HostUnknown []string `json:"host_unknown,omitempty"`
 }
+
+// Values of ScanResults.DomainSource.
+const (
+	DomainFlag       = "flag"
+	DomainTarget     = "target"
+	DomainIP         = "ip"
+	DomainStreamFrom = "stream-from"
+	DomainReverseDNS = "reverse-dns"
+)
 
 // Flags holds the command-line configuration for the XMPP scan module.
 // Populated by the framework.
@@ -118,6 +139,9 @@ type Flags struct {
 
 	// XMPPDomain is the domain sent in the 'to' attribute of the stream header; empty falls back to the target domain, then to the target IP address.
 	XMPPDomain string `long:"xmpp-domain" description:"Domain to send in the 'to' attribute of the stream header, and as SNI and certificate name unless --server-name or --no-sni is given (default: target domain, else target IP address)"`
+
+	// RetryDomain retries a host-unknown answer with the other domains the scanner can find.
+	RetryDomain bool `long:"retry-domain" description:"On a host-unknown stream error, reconnect with the domain in the server's stream header 'from', then with the target IP's reverse DNS name, each also used as SNI"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -130,6 +154,9 @@ func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
 type Scanner struct {
 	zgrab2.BaseScanner
 	config *Flags
+	// lookupAddr resolves an IP address to its reverse DNS names; nil is
+	// net.DefaultResolver.LookupAddr.
+	lookupAddr func(context.Context, string) ([]string, error)
 }
 
 // Validate checks that the flags are valid.
@@ -176,6 +203,9 @@ const commandSTARTTLS = "<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>"
 var (
 	// streamHeaderRegex matches the server's stream header.
 	streamHeaderRegex = regexp.MustCompile(`<stream:stream\b[^>]*>`)
+	// streamFromRegex matches the 'from' attribute of a stream header; group
+	// 1 or 2 is its value.
+	streamFromRegex = regexp.MustCompile(`\sfrom\s*=\s*(?:'([^']*)'|"([^"]*)")`)
 	// prefixedHeaderRegex matches a stream header with any prefix.
 	prefixedHeaderRegex = regexp.MustCompile(`<[^\s:/>]+:stream\b[^>]*>`)
 	// streamNamespaceRegex matches the stream namespace bound to any prefix,
@@ -227,7 +257,100 @@ func getStreamError(response string) string {
 //  4. If the server advertises STARTTLS (or --send-starttls-override is set),
 //     send STARTTLS, read the result, negotiate a TLS connection.
 //  5. Close the connection.
+//
+// With --retry-domain, a host-unknown answer is followed by one new
+// connection per other domain the scanner can find: the 'from' of the
+// server's stream header, then the target IP's reverse DNS name. On a retry
+// that domain is also the TLS SNI, as the first 'to' is in TLS-Attacker.
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
+	domain, source := scanner.config.XMPPDomain, DomainFlag
+	if domain == "" {
+		domain, source = target.Domain, DomainTarget
+	}
+	if domain == "" {
+		domain, source = target.Host(), DomainIP
+	}
+	status, result, err := scanner.scanDomain(ctx, dialGroup, target, domain)
+	if result == nil {
+		return status, nil, err // an untyped nil, not a nil *ScanResults
+	}
+	result.Domain, result.DomainSource = domain, source
+	if !scanner.config.RetryDomain {
+		return status, result, err
+	}
+	lookup := scanner.lookupAddr
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupAddr
+	}
+	search := &domainSearch{tried: map[string]bool{strings.ToLower(domain): true}}
+	var rejected []string
+	for result.StreamError == "host-unknown" {
+		rejected = append(rejected, domain)
+		domain, source = search.next(ctx, lookup, target, result.Banner)
+		if domain == "" {
+			break
+		}
+		retryTarget := *target
+		retryTarget.Domain = domain
+		retryStatus, retryResult, retryErr := scanner.scanDomain(ctx, dialGroup, &retryTarget, domain)
+		if retryResult == nil {
+			// The retry failed before the server answered: report the
+			// last host-unknown answer.
+			break
+		}
+		status, result, err = retryStatus, retryResult, retryErr
+		result.Domain, result.DomainSource = domain, source
+	}
+	result.HostUnknown = rejected
+	return status, result, err
+}
+
+// domainSearch is the state of one scan's search for a domain the server
+// serves.
+type domainSearch struct {
+	tried    map[string]bool // domains sent, lower case, without a final dot
+	rdns     []string        // the target IP's reverse DNS names
+	rdnsDone bool            // rdns was looked up
+}
+
+// next returns the next domain not yet tried and its source: the 'from' of
+// the stream header in banner, then the target IP's reverse DNS names; ""
+// if there is none.
+func (search *domainSearch) next(ctx context.Context, lookup func(context.Context, string) ([]string, error), target *zgrab2.ScanTarget, banner string) (string, string) {
+	take := func(d string) string {
+		d = strings.TrimSuffix(d, ".")
+		key := strings.ToLower(d)
+		if key == "" || search.tried[key] {
+			return ""
+		}
+		search.tried[key] = true
+		return d
+	}
+	if match := streamFromRegex.FindStringSubmatch(streamHeaderRegex.FindString(banner)); match != nil {
+		if d := take(match[1] + match[2]); d != "" {
+			return d, DomainStreamFrom
+		}
+	}
+	if target.IP == nil {
+		return "", ""
+	}
+	if !search.rdnsDone {
+		search.rdnsDone = true
+		if names, err := lookup(ctx, target.IP.String()); err == nil {
+			search.rdns = names
+		}
+	}
+	for _, name := range search.rdns {
+		if d := take(name); d != "" {
+			return d, DomainReverseDNS
+		}
+	}
+	return "", ""
+}
+
+// scanDomain runs the scan once on a new connection with domain in the
+// stream header's 'to'.
+func (scanner *Scanner) scanDomain(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget, domain string) (zgrab2.ScanStatus, *ScanResults, error) {
 	l4Dialer := dialGroup.L4Dialer
 	if l4Dialer == nil {
 		return zgrab2.SCAN_INVALID_INPUTS, nil, errors.New("no L4 dialer found. XMPP requires a L4 dialer")
@@ -260,13 +383,6 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		conn = tlsConn
 	}
 	xmppConn := Connection{Conn: conn}
-	domain := scanner.config.XMPPDomain
-	if domain == "" {
-		domain = target.Domain
-	}
-	if domain == "" {
-		domain = target.Host()
-	}
 	banner, err := xmppConn.SendCommand(fmt.Sprintf(streamOpening, xmlEscaper.Replace(domain)), openingEndRegex)
 	if err != nil {
 		status := zgrab2.TryGetScanStatus(err)
