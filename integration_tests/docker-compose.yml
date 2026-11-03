@@ -119,6 +119,16 @@ services:
     container_name: "zgrab_http_fail_to_https"
     hostname: "target"
 
+  # CUPS implements the RFC 2817 upgrade to TLS on its IPP port; the plaintext
+  # container on purpose, as ipp-cups-tls listens with implicit TLS only
+  http-starttls:
+    build:
+      context: ./ipp/container-cups
+    container_name: "zgrab_http_starttls"
+    hostname: "target"
+    depends_on:
+      - ipp_service_base
+
   ipp-cups:
     build:
       context: ./ipp/container-cups
