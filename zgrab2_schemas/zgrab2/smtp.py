@@ -13,6 +13,8 @@ smtp_scan_response = SubRecord(
             {
                 "banner": String(),
                 "ehlo": String(),
+                "lhlo": String(),
+                "lmtp": Boolean(),
                 "helo": String(),
                 "help": String(),
                 "starttls": String(),

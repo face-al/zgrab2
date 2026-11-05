@@ -27,6 +27,12 @@
 // With --sslv2, after the server accepts STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
 // (lib/sslv2) instead of the TLS handshake and stops after the reply; the
 // outcome goes to the sslv2 field and is the scan status.
+//
+// With --lhlo-fallback (needs EHLO, e.g. --send-ehlo-override), an EHLO
+// refused with 500 or 503 is followed by LHLO on the same connection. An LMTP
+// server greets like SMTP but must not accept EHLO, 500 recommended (RFC 2033,
+// section 4.1), so a 250 reply to LHLO identifies LMTP; its capabilities then
+// decide STARTTLS, as the EHLO reply does for SMTP.
 package smtp
 
 import (
@@ -54,6 +60,13 @@ type ScanResults struct {
 
 	// EHLO is the server's response to the EHLO command, if one is sent.
 	EHLO string `json:"ehlo,omitempty"`
+
+	// LHLO is the server's response to the LHLO command, sent with
+	// --lhlo-fallback after EHLO is refused.
+	LHLO string `json:"lhlo,omitempty"`
+
+	// LMTP is true if the server accepted LHLO (code 250), i.e. it speaks LMTP.
+	LMTP bool `json:"lmtp,omitempty"`
 
 	// HELP is the server's response to the HELP command, if it is sent.
 	HELP string `json:"help,omitempty"`
@@ -105,6 +118,9 @@ type Flags struct {
 
 	// EHLODomain is the client domain sent with EHLO; empty falls back to the target domain.
 	EHLODomain string `long:"ehlo-domain" description:"Client domain to send with the EHLO command (default: target domain)"`
+
+	// LHLOFallback sends LHLO after EHLO is refused, to recognize LMTP servers.
+	LHLOFallback bool `long:"lhlo-fallback" description:"If EHLO is refused with 500 or 503, send LHLO (with the EHLO domain) to recognize an LMTP server (RFC 2033); needs EHLO, e.g. --send-ehlo-override"`
 
 	// HELODomain is the client domain sent with HELO; empty falls back to the target domain.
 	HELODomain string `long:"helo-domain" description:"Client domain to send with the HELO command (default: target domain)"`
@@ -285,6 +301,19 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		}
 		result.EHLO = ret
 		moduleMetadata.incrementHostsSupportingEHLO() // mark that we found a host that supports EHLO
+		// An LMTP server answers EHLO with an error, 500 recommended (RFC 2033,
+		// section 4.1); 500 and 503 are the refusals TLS-Attacker answers with
+		// a retry (SMTP BAD_SEQUENCE_REGEX ^50[03]).
+		if code, codeErr := getSMTPCode(ret); scanner.config.LHLOFallback && codeErr == nil && (code == 500 || code == 503) {
+			// LHLO is only a probe: if it cannot be sent (the server closed
+			// after refusing EHLO), the result stays that of an SMTP server.
+			if lhlo, lhloErr := smtpConn.SendCommand(getCommand("LHLO", domain)); lhloErr == nil {
+				result.LHLO = lhlo
+				if code, codeErr = getSMTPCode(lhlo); codeErr == nil && code == 250 {
+					result.LMTP = true
+				}
+			}
+		}
 	} else {
 		// send a HELO msg since server doesn't support EHLO
 		domain := scanner.config.HELODomain
@@ -306,6 +335,9 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		result.HELP = ret
 	}
 	serverSupportsSTARTTLS := strings.Contains(result.EHLO, "STARTTLS")
+	if result.LMTP {
+		serverSupportsSTARTTLS = lhloSupportsSTARTTLS(result.LHLO)
+	}
 	shouldSendSTARTTLS := scanner.config.SendSTARTTLSOverride || serverSupportsSTARTTLS
 	// If the server supports STARTTLS or user requests STARTTLS, and we haven't already negotiated a TLS connection
 	if shouldSendSTARTTLS && !scanner.config.SMTPSecure {
@@ -353,4 +385,21 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	}
 
 	return sr, result, nil
+}
+
+// lhloSupportsSTARTTLS reports whether an LHLO reply lists the STARTTLS
+// keyword: the first word of a line after the first (domain) line, matched
+// case-insensitively (RFC 5321, section 4.1.1.1), as the lmtp module does.
+func lhloSupportsSTARTTLS(lhlo string) bool {
+	lines := strings.Split(strings.TrimSuffix(lhlo, "\r\n"), "\r\n")
+	for _, line := range lines[1:] {
+		if len(line) < 4 {
+			continue
+		}
+		fields := strings.Fields(line[4:])
+		if len(fields) > 0 && strings.EqualFold(fields[0], "STARTTLS") {
+			return true
+		}
+	}
+	return false
 }
