@@ -28,3 +28,20 @@ echo ")}] END vsftpd logs from $CONTAINER_NAME"
 echo "ftp/test: BEGIN docker logs from $CONTAINER_NAME [{("
 docker logs --tail all $CONTAINER_NAME
 echo ")}] END docker logs from $CONTAINER_NAME"
+
+# The smtp module's --ftp-fallback against the same FTP server: EHLO is
+# refused, FEAT answered with 211, so the server is marked FTP and gets
+# AUTH TLS instead of STARTTLS. Kept outside $OUTPUT_DIR, whose files are ftp scans.
+echo "ftp/test: Testing smtp --ftp-fallback on $CONTAINER_NAME..."
+mkdir -p $ZGRAB_OUTPUT/ftp-smtp
+FILE=$ZGRAB_OUTPUT/ftp-smtp/ftp-fallback.json
+CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp --port 21 --send-ehlo-override --ftp-fallback > $FILE
+for CHECK in "data.smtp.status=\"success\"" "data.smtp.result.ftp=true" "data.smtp.result.tls.handshake_completed_successfully=true"; do
+  if [ "$(jp ${CHECK%%=*} < $FILE)" != "${CHECK#*=}" ]; then
+    echo "Expected ${CHECK} in $FILE [["
+    cat $FILE
+    echo "]]"
+    exit 1
+  fi
+done
+(cd $ZGRAB_ROOT && python3 -m zschema validate zgrab2 $FILE --path . --module zgrab2_schemas.zgrab2)

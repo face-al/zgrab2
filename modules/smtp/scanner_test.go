@@ -1,16 +1,19 @@
 package smtp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	stdtls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,5 +210,214 @@ func TestScanSMTPSPostTLSAppError(t *testing.T) {
 	}
 	if !smtpResult.TLSLog.HandshakeCompletedSuccessfully {
 		t.Error("expected HandshakeCompletedSuccessfully = true after successful TLS handshake")
+	}
+}
+
+// closeConn as a reply makes the fake server close the connection instead;
+// splitHere in a reply makes it send the reply in two writes.
+const (
+	closeConn = "close"
+	splitHere = "<split>"
+)
+
+func TestFTPFallbackValidate(t *testing.T) {
+	if err := (Flags{FTPFallback: true, SendHELOOverride: true}).Validate(nil); err == nil {
+		t.Error("expected --ftp-fallback with --send-helo-override to be rejected")
+	}
+	if err := (Flags{FTPFallback: true, SendEHLOOverride: true}).Validate(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// scanFEAT runs a scan with --send-ehlo-override and the given
+// --ftp-fallback setting against a fake server that greets with greeting and
+// answers each command with the next reply in replies. The TLS wrapper fails,
+// so an accepted upgrade ends in a handshake error.
+func scanFEAT(t *testing.T, fallback bool, greeting string, replies ...string) (zgrab2.ScanStatus, *ScanResults, []string) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	cmds := make(chan string, 8)
+	go func() {
+		defer serverConn.Close()
+		defer close(cmds)
+		buf := make([]byte, 512)
+		serverConn.Write([]byte(greeting))
+		for _, reply := range replies {
+			n, err := serverConn.Read(buf)
+			if err != nil {
+				return
+			}
+			cmds <- string(buf[:n])
+			if reply == closeConn {
+				return
+			}
+			for _, part := range strings.Split(reply, splitHere) {
+				serverConn.Write([]byte(part))
+			}
+		}
+	}()
+
+	scanner := &Scanner{config: &Flags{SendEHLOOverride: true, FTPFallback: fallback, EHLODomain: "scanner.example.com"}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 21}
+	dialGroup := &zgrab2.DialerGroup{
+		L4Dialer: makeL4Dialer(clientConn),
+		TLSWrapper: func(context.Context, *zgrab2.ScanTarget, net.Conn) (*zgrab2.TLSConnection, error) {
+			return nil, errors.New("handshake failed")
+		},
+	}
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	clientConn.Close()
+	var sent []string
+	for cmd := range cmds {
+		sent = append(sent, cmd)
+	}
+	smtpResult, _ := result.(*ScanResults)
+	return status, smtpResult, sent
+}
+
+func TestFTPFallback(t *testing.T) {
+	const (
+		ehlo      = "EHLO scanner.example.com\r\n"
+		feat      = "FEAT\r\n"
+		authTLS   = "AUTH TLS\r\n"
+		starttls  = "STARTTLS\r\n"
+		filezilla = "220-FileZilla Server 0.9.60 beta\r\n220 Please visit https://filezilla-project.org/\r\n"
+		bare      = "220 Service ready for new user.\r\n"
+		features  = "211-Features:\r\n MDTM\r\n AUTH TLS\r\n PBSZ\r\n PROT\r\n211 End\r\n"
+	)
+	tests := map[string]struct {
+		fallback    bool
+		greeting    string
+		replies     []string
+		wantSent    []string
+		wantFTP     bool
+		wantFEAT    bool
+		wantAuthTLS bool
+		wantStatus  zgrab2.ScanStatus
+	}{
+		"filezilla, AUTH TLS accepted": {
+			fallback:    true,
+			greeting:    filezilla,
+			replies:     []string{"500 Syntax error, command unrecognized.\r\n", features, "234 Using authentication type TLS\r\n"},
+			wantSent:    []string{ehlo, feat, authTLS},
+			wantFTP:     true,
+			wantFEAT:    true,
+			wantAuthTLS: true,
+			wantStatus:  zgrab2.SCAN_HANDSHAKE_ERROR, // the test's TLS wrapper fails
+		},
+		"bare greeting, 501, AUTH TLS refused": {
+			fallback:    true,
+			greeting:    bare,
+			replies:     []string{"501 Syntax error\r\n", "211 No features\r\n", "534 Policy requires SSL.\r\n"},
+			wantSent:    []string{ehlo, feat, authTLS},
+			wantFTP:     true,
+			wantFEAT:    true,
+			wantAuthTLS: true,
+			wantStatus:  zgrab2.SCAN_APPLICATION_ERROR,
+		},
+		"AUTH TLS answered with another 2xx": {
+			fallback:    true,
+			greeting:    bare,
+			replies:     []string{"500 Unknown command\r\n", features, "200 OK\r\n"},
+			wantSent:    []string{ehlo, feat, authTLS},
+			wantFTP:     true,
+			wantFEAT:    true,
+			wantAuthTLS: true,
+			wantStatus:  zgrab2.SCAN_APPLICATION_ERROR,
+		},
+		"vsftpd, 530 to EHLO, FEAT in two segments": {
+			fallback:    true,
+			greeting:    "220 (vsFTPd 3.0.5)\r\n",
+			replies:     []string{"530 Please login with USER and PASS.\r\n", "211-Features:\r\n MDTM\r\n" + splitHere + " AUTH TLS\r\n211 End\r\n", "234 Proceed with negotiation.\r\n"},
+			wantSent:    []string{ehlo, feat, authTLS},
+			wantFTP:     true,
+			wantFEAT:    true,
+			wantAuthTLS: true,
+			wantStatus:  zgrab2.SCAN_HANDSHAKE_ERROR,
+		},
+		"FEAT reply opening with 211 but ending with another code": {
+			fallback:   true,
+			greeting:   bare,
+			replies:    []string{"500 Unknown command\r\n", "211-Features:\r\n MDTM\r\n500 x\r\n"},
+			wantSent:   []string{ehlo, feat},
+			wantFEAT:   true,
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"smtp server": {
+			fallback:   true,
+			greeting:   "220 mail.example.com ESMTP\r\n",
+			replies:    []string{"250-mail.example.com\r\n250 STARTTLS\r\n", "220 Ready to start TLS\r\n"},
+			wantSent:   []string{ehlo, starttls},
+			wantStatus: zgrab2.SCAN_HANDSHAKE_ERROR,
+		},
+		"ehlo refused, FEAT refused": {
+			fallback:   true,
+			greeting:   bare,
+			replies:    []string{"500 Unknown command\r\n", "500 Unknown command\r\n"},
+			wantSent:   []string{ehlo, feat},
+			wantFEAT:   true,
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"ehlo refused, server closes": {
+			fallback:   true,
+			greeting:   bare,
+			replies:    []string{"500 Unknown command\r\n", closeConn},
+			wantSent:   []string{ehlo, feat},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"ehlo refused with 4xx": {
+			fallback:   true,
+			greeting:   bare,
+			replies:    []string{"421 Too many connections\r\n"},
+			wantSent:   []string{ehlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"fallback off": {
+			greeting:   filezilla,
+			replies:    []string{"500 Syntax error, command unrecognized.\r\n"},
+			wantSent:   []string{ehlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			status, result, sent := scanFEAT(t, test.fallback, test.greeting, test.replies...)
+			if result == nil {
+				t.Fatal("expected a result")
+			}
+			if len(sent) != len(test.wantSent) {
+				t.Fatalf("sent %q, want %q", sent, test.wantSent)
+			}
+			for i := range sent {
+				if sent[i] != test.wantSent[i] {
+					t.Fatalf("sent %q, want %q", sent, test.wantSent)
+				}
+			}
+			if status != test.wantStatus {
+				t.Errorf("status = %v, want %v", status, test.wantStatus)
+			}
+			if result.FTP != test.wantFTP {
+				t.Errorf("FTP = %v, want %v", result.FTP, test.wantFTP)
+			}
+			if (result.FEAT != "") != test.wantFEAT {
+				t.Errorf("FEAT = %q, want kept: %v", result.FEAT, test.wantFEAT)
+			}
+			if (result.AuthTLS != "") != test.wantAuthTLS {
+				t.Errorf("AuthTLS = %q, want kept: %v", result.AuthTLS, test.wantAuthTLS)
+			}
+			if test.wantFTP && result.StartTLS != "" {
+				t.Errorf("STARTTLS reply kept for an FTP server: %q", result.StartTLS)
+			}
+			out, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantFTP && bytes.Contains(out, []byte(`"ftp"`)) {
+				t.Errorf("ftp must be omitted for a non-FTP server: %s", out)
+			}
+		})
 	}
 }
