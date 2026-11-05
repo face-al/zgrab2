@@ -1,16 +1,20 @@
 package smtp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	stdtls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -207,5 +211,312 @@ func TestScanSMTPSPostTLSAppError(t *testing.T) {
 	}
 	if !smtpResult.TLSLog.HandshakeCompletedSuccessfully {
 		t.Error("expected HandshakeCompletedSuccessfully = true after successful TLS handshake")
+	}
+}
+
+// scanSSLv2 runs an --sslv2 scan against a fake SMTP server that accepts
+// STARTTLS and then hands the connection to fn.
+func scanSSLv2(t *testing.T, fn func(net.Conn)) (zgrab2.ScanStatus, *ScanResults) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		defer serverConn.Close()
+		buf := make([]byte, 512)
+		serverConn.Write([]byte("220 test.example.com ESMTP\r\n"))
+		serverConn.Read(buf) // EHLO
+		serverConn.Write([]byte("250-test.example.com\r\n250 STARTTLS\r\n"))
+		serverConn.Read(buf) // STARTTLS
+		serverConn.Write([]byte("220 Ready to start TLS\r\n"))
+		fn(serverConn)
+	}()
+
+	scanner := &Scanner{config: &Flags{SSLv2: true}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 587}
+	dialGroup := &zgrab2.DialerGroup{
+		L4Dialer: makeL4Dialer(clientConn),
+		TLSWrapper: func(context.Context, *zgrab2.ScanTarget, net.Conn) (*zgrab2.TLSConnection, error) {
+			return nil, errors.New("TLS wrapper must not be used with --sslv2")
+		},
+	}
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	smtpResult, _ := result.(*ScanResults)
+	return status, smtpResult
+}
+
+func TestSSLv2UpgradeRefused(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		defer serverConn.Close()
+		buf := make([]byte, 512)
+		serverConn.Write([]byte("220 test.example.com ESMTP\r\n"))
+		serverConn.Read(buf) // EHLO
+		serverConn.Write([]byte("250-test.example.com\r\n250 STARTTLS\r\n"))
+		serverConn.Read(buf) // STARTTLS
+		serverConn.Write([]byte("454 4.7.0 TLS not available\r\n"))
+	}()
+
+	scanner := &Scanner{config: &Flags{SSLv2: true}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 587}
+	dialGroup := &zgrab2.DialerGroup{L4Dialer: makeL4Dialer(clientConn), TLSWrapper: func(context.Context, *zgrab2.ScanTarget, net.Conn) (*zgrab2.TLSConnection, error) {
+		return nil, errors.New("unused")
+	}}
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	if status != zgrab2.SCAN_APPLICATION_ERROR {
+		t.Errorf("expected SCAN_APPLICATION_ERROR, got %s", status)
+	}
+	if smtpResult, _ := result.(*ScanResults); smtpResult == nil || smtpResult.SSLv2 != nil {
+		t.Errorf("expected result without sslv2, got %+v", result)
+	}
+}
+
+func TestSSLv2Validate(t *testing.T) {
+	if err := (Flags{SMTPSecure: true, SSLv2: true}).Validate(nil); err == nil {
+		t.Error("expected error for --smtps with --sslv2")
+	}
+	if err := (Flags{SSLv2: true}).Validate(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// sslv2Server returns the server side of the SSL 2.0 probe: it reads the
+// 48-byte CLIENT-HELLO, checks its header and version, and writes reply.
+func sslv2Server(t *testing.T, reply []byte) func(net.Conn) {
+	return func(conn net.Conn) {
+		hello := make([]byte, 48)
+		if _, err := io.ReadFull(conn, hello); err != nil {
+			t.Errorf("reading CLIENT-HELLO: %v", err)
+
+			return
+		}
+		if !bytes.HasPrefix(hello, []byte{0x80, 0x2e, 0x01}) {
+			t.Errorf("unexpected CLIENT-HELLO prefix %x", hello[:3])
+		}
+		conn.Write(reply)
+	}
+}
+
+func TestSSLv2Upgrade(t *testing.T) {
+	serverHello, err := os.ReadFile("../../lib/sslv2/testdata/openssl-1.0.2u-server-hello.bin")
+	if err != nil {
+		t.Fatalf("reading SERVER-HELLO fixture: %v", err)
+	}
+
+	t.Run("server hello", func(t *testing.T) {
+		status, result := scanSSLv2(t, sslv2Server(t, serverHello))
+		if status != zgrab2.SCAN_SUCCESS {
+			t.Fatalf("expected SCAN_SUCCESS, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_SUCCESS {
+			t.Errorf("expected sslv2 status SCAN_SUCCESS, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result == nil || result.SSLv2.ServerHello == nil {
+			t.Errorf("expected SERVER-HELLO, got %+v", result.SSLv2.Result)
+		}
+		if result.TLSLog != nil {
+			t.Error("expected no TLS log")
+		}
+	})
+
+	t.Run("tls alert", func(t *testing.T) {
+		status, result := scanSSLv2(t, sslv2Server(t, []byte{0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46}))
+		if status != zgrab2.SCAN_PROTOCOL_ERROR {
+			t.Fatalf("expected SCAN_PROTOCOL_ERROR, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_PROTOCOL_ERROR {
+			t.Errorf("expected sslv2 status SCAN_PROTOCOL_ERROR, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result == nil || result.SSLv2.Raw != "15030100020246" {
+			t.Errorf("expected the TLS alert in raw, got %+v", result.SSLv2.Result)
+		}
+		if result.TLSLog != nil {
+			t.Error("expected no TLS log")
+		}
+	})
+
+	t.Run("connection closed", func(t *testing.T) {
+		status, result := scanSSLv2(t, func(conn net.Conn) {
+			// net.Pipe fails the client's write once the server has closed,
+			// unlike TCP: read the CLIENT-HELLO, then close without replying.
+			io.ReadFull(conn, make([]byte, 48))
+		})
+		if status != zgrab2.SCAN_CONNECTION_CLOSED {
+			t.Fatalf("expected SCAN_CONNECTION_CLOSED, got %s", status)
+		}
+		if result == nil || result.SSLv2 == nil {
+			t.Fatalf("expected sslv2 result, got %+v", result)
+		}
+		if result.SSLv2.Status != zgrab2.SCAN_CONNECTION_CLOSED {
+			t.Errorf("expected sslv2 status SCAN_CONNECTION_CLOSED, got %s", result.SSLv2.Status)
+		}
+		if result.SSLv2.Result != nil {
+			t.Errorf("expected no sslv2 reply, got %+v", result.SSLv2.Result)
+		}
+	})
+}
+
+// closeConn as a reply makes the fake server close the connection instead.
+const closeConn = "close"
+
+// scanLHLO runs a scan with --send-ehlo-override and the given
+// --lhlo-fallback setting against a fake server that answers each command
+// with the next reply in replies; STARTTLS, if sent, is refused with 454.
+func scanLHLO(t *testing.T, fallback bool, replies ...string) (zgrab2.ScanStatus, *ScanResults, []string) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	cmds := make(chan string, 8)
+	go func() {
+		defer serverConn.Close()
+		defer close(cmds)
+		buf := make([]byte, 512)
+		serverConn.Write([]byte("220 test.example.com Dovecot ready.\r\n"))
+		for _, reply := range append(replies, "454 TLS not available\r\n") {
+			n, err := serverConn.Read(buf)
+			if err != nil {
+				return
+			}
+			cmds <- string(buf[:n])
+			if reply == closeConn {
+				return
+			}
+			serverConn.Write([]byte(reply))
+		}
+	}()
+
+	scanner := &Scanner{config: &Flags{SendEHLOOverride: true, LHLOFallback: fallback, EHLODomain: "scanner.example.com"}}
+	target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 24}
+	dialGroup := &zgrab2.DialerGroup{L4Dialer: makeL4Dialer(clientConn)}
+	status, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+	clientConn.Close()
+	var sent []string
+	for cmd := range cmds {
+		sent = append(sent, cmd)
+	}
+	smtpResult, _ := result.(*ScanResults)
+	return status, smtpResult, sent
+}
+
+func TestLHLOFallback(t *testing.T) {
+	const (
+		ehlo     = "EHLO scanner.example.com\r\n"
+		lhlo     = "LHLO scanner.example.com\r\n"
+		starttls = "STARTTLS\r\n"
+	)
+	tests := map[string]struct {
+		fallback   bool
+		replies    []string
+		wantSent   []string
+		wantLMTP   bool
+		wantLHLO   bool
+		wantStatus zgrab2.ScanStatus
+	}{
+		"lmtp server": {
+			fallback:   true,
+			replies:    []string{"500 5.5.1 Unknown command\r\n", "250-test.example.com\r\n250-PIPELINING\r\n250 STARTTLS\r\n"},
+			wantSent:   []string{ehlo, lhlo, starttls},
+			wantLMTP:   true,
+			wantLHLO:   true,
+			wantStatus: zgrab2.SCAN_APPLICATION_ERROR, // STARTTLS refused with 454
+		},
+		"lmtp server, 503, keyword lower case": {
+			fallback:   true,
+			replies:    []string{"503 Bad sequence of commands\r\n", "250-test.example.com\r\n250 starttls\r\n"},
+			wantSent:   []string{ehlo, lhlo, starttls},
+			wantLMTP:   true,
+			wantLHLO:   true,
+			wantStatus: zgrab2.SCAN_APPLICATION_ERROR,
+		},
+		"lmtp server, multiline refusal, no STARTTLS": {
+			fallback:   true,
+			replies:    []string{"500-Unknown command\r\n500 Use LHLO\r\n", "250-test.example.com\r\n250 PIPELINING\r\n"},
+			wantSent:   []string{ehlo, lhlo},
+			wantLMTP:   true,
+			wantLHLO:   true,
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"lmtp server, STARTTLS only in free text": {
+			fallback:   true,
+			replies:    []string{"500 Unknown command, no STARTTLS before LHLO\r\n", "250-STARTTLS.example.com\r\n250 PIPELINING\r\n"},
+			wantSent:   []string{ehlo, lhlo},
+			wantLMTP:   true,
+			wantLHLO:   true,
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"smtp server": {
+			fallback:   true,
+			replies:    []string{"250-test.example.com\r\n250 STARTTLS\r\n"},
+			wantSent:   []string{ehlo, starttls},
+			wantStatus: zgrab2.SCAN_APPLICATION_ERROR,
+		},
+		"ehlo refused, lhlo refused": {
+			fallback:   true,
+			replies:    []string{"500 Unknown command\r\n", "500 Unknown command\r\n"},
+			wantSent:   []string{ehlo, lhlo},
+			wantLHLO:   true,
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"ehlo refused, server closes": {
+			fallback:   true,
+			replies:    []string{"500 Unknown command\r\n", closeConn},
+			wantSent:   []string{ehlo, lhlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"ehlo not implemented": {
+			fallback:   true,
+			replies:    []string{"502 Command not implemented\r\n"},
+			wantSent:   []string{ehlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"ehlo syntax error": {
+			fallback:   true,
+			replies:    []string{"501 Syntax error\r\n"},
+			wantSent:   []string{ehlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+		"fallback off": {
+			replies:    []string{"500 5.5.1 Unknown command\r\n"},
+			wantSent:   []string{ehlo},
+			wantStatus: zgrab2.SCAN_SUCCESS,
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			status, result, sent := scanLHLO(t, test.fallback, test.replies...)
+			if result == nil {
+				t.Fatal("expected a result")
+			}
+			if len(sent) != len(test.wantSent) {
+				t.Fatalf("sent %q, want %q", sent, test.wantSent)
+			}
+			for i := range sent {
+				if sent[i] != test.wantSent[i] {
+					t.Fatalf("sent %q, want %q", sent, test.wantSent)
+				}
+			}
+			if status != test.wantStatus {
+				t.Errorf("status = %v, want %v", status, test.wantStatus)
+			}
+			if result.LMTP != test.wantLMTP {
+				t.Errorf("LMTP = %v, want %v", result.LMTP, test.wantLMTP)
+			}
+			if (result.LHLO != "") != test.wantLHLO {
+				t.Errorf("LHLO = %q, want kept: %v", result.LHLO, test.wantLHLO)
+			}
+			out, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantLMTP && bytes.Contains(out, []byte(`"lmtp"`)) {
+				t.Errorf("lmtp must be omitted for a non-LMTP server: %s", out)
+			}
+		})
 	}
 }

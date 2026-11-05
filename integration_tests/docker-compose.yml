@@ -37,6 +37,13 @@ services:
     depends_on:
       - service_base
 
+  lmtp_service_base:
+    build:
+      context: ./lmtp
+    image: "zgrab2_lmtp_service_base:latest"
+    depends_on:
+      - service_base
+
   smtp_service_base:
     build:
         context: ./smtp
@@ -138,6 +145,36 @@ services:
     hostname: "target"
     depends_on:
       - ipp_service_base
+
+  lmtp_starttls:
+    build:
+      context: ./lmtp/starttls
+    container_name: zgrab_lmtp_starttls
+    networks:
+      - lmtp-starttls-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
+
+  lmtp_no_starttls:
+    build:
+      context: ./lmtp/no-starttls
+    container_name: zgrab_lmtp_no_starttls
+    networks:
+      - lmtp-no-starttls-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
+
+  lmtp_lmtps:
+    build:
+      context: ./lmtp/lmtps
+    container_name: zgrab_lmtp_lmtps
+    networks:
+      - lmtp-lmtps-network
+    hostname: "target"
+    depends_on:
+      - lmtp_service_base
 
   managesieve:
     image: stalwartlabs/stalwart:latest
@@ -532,6 +569,16 @@ services:
     depends_on:
       - service_base
 
+  sslv2:
+    container_name: "zgrab_sslv2"
+    build:
+      context: ./sslv2
+    networks:
+      - sslv2-network
+    hostname: "target"
+    depends_on:
+      - service_base
+
   telnet:
     container_name: "zgrab_telnet"
     build:
@@ -583,6 +630,21 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.28/30
+  lmtp-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.236/30
+  lmtp-no-starttls-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.240/30
+  lmtp-lmtps-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.0.244/30
   memcache-network-1.6.0:
     driver: bridge
     ipam:
@@ -763,6 +825,11 @@ networks:
     ipam:
       config:
         - subnet: 100.64.0.172/30
+  sslv2-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 100.64.1.16/30
   telnet-network:
     driver: bridge
     ipam:
