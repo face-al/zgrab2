@@ -87,10 +87,11 @@ checkFileForField $OUTPUT_ROOT/smtps-tls.json tls
 checkFileForLackOfField $OUTPUT_ROOT/smtps-tls.json starttls
 checkFileForLackOfField $OUTPUT_ROOT/helo.json starttls
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_no_starttls.json starttls
-# An SMTP server accepts EHLO, so --ftp-fallback sends no FEAT
+# An SMTP server accepts EHLO, so --ftp-fallback sends neither AUTH TLS nor FEAT
 checkFileForField $OUTPUT_ROOT/ehlo_ftp_fallback.json tls
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json feat
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json ftp
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json auth_tls
 
 
 exit $status

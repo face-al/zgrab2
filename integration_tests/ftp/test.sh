@@ -30,8 +30,8 @@ docker logs --tail all $CONTAINER_NAME
 echo ")}] END docker logs from $CONTAINER_NAME"
 
 # The smtp module's --ftp-fallback against the same FTP server: EHLO is
-# refused, FEAT answered with 211, so the server is marked FTP and gets
-# AUTH TLS instead of STARTTLS. Kept outside $OUTPUT_DIR, whose files are ftp scans.
+# refused, AUTH TLS granted with 234, so the server is marked FTP and the TLS
+# handshake follows. Kept outside $OUTPUT_DIR, whose files are ftp scans.
 echo "ftp/test: Testing smtp --ftp-fallback on $CONTAINER_NAME..."
 mkdir -p $ZGRAB_OUTPUT/ftp-smtp
 FILE=$ZGRAB_OUTPUT/ftp-smtp/ftp-fallback.json
