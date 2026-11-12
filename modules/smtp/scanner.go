@@ -357,7 +357,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		}
 		// An FTP server answers EHLO with an error (FileZilla 500 or 501,
 		// vsftpd and Apache FtpServer 530).
-		if code, codeErr := getSMTPCode(ret); scanner.config.FTPFallback && codeErr == nil && code >= 500 && code < 600 {
+		if code, codeErr := getSMTPCode(ret); scanner.config.FTPFallback && !result.LMTP && codeErr == nil && code >= 500 && code < 600 {
 			if err := scanner.probeFTP(&smtpConn, result); err != nil {
 				return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send AUTH TLS command: %w", err)
 			}

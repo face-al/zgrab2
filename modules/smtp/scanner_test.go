@@ -747,6 +747,55 @@ func TestFTPFallback(t *testing.T) {
 	}
 }
 
+// TestLHLOAndFTPFallback checks the two fallbacks together, as the scan runs
+// them: LHLO first, AUTH TLS and FEAT only for a server that is not LMTP.
+func TestLHLOAndFTPFallback(t *testing.T) {
+	scan := func(greeting string, replies ...string) (*ScanResults, []string) {
+		clientConn, serverConn := net.Pipe()
+		if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		cmds := make(chan string, 8)
+		go func() {
+			defer serverConn.Close()
+			defer close(cmds)
+			buf := make([]byte, 512)
+			serverConn.Write([]byte(greeting))
+			for _, reply := range replies {
+				n, err := serverConn.Read(buf)
+				if err != nil {
+					return
+				}
+				cmds <- string(buf[:n])
+				serverConn.Write([]byte(reply))
+			}
+		}()
+		scanner := &Scanner{config: &Flags{SendEHLOOverride: true, LHLOFallback: true, FTPFallback: true, EHLODomain: "scanner.example.com"}}
+		target := &zgrab2.ScanTarget{IP: net.ParseIP("127.0.0.1"), Port: 24}
+		dialGroup := &zgrab2.DialerGroup{L4Dialer: makeL4Dialer(clientConn), TLSWrapper: func(context.Context, *zgrab2.ScanTarget, net.Conn) (*zgrab2.TLSConnection, error) {
+			return nil, errors.New("handshake failed")
+		}}
+		_, result, _ := scanner.Scan(context.Background(), dialGroup, target)
+		clientConn.Close()
+		var sent []string
+		for cmd := range cmds {
+			sent = append(sent, cmd)
+		}
+		smtpResult, _ := result.(*ScanResults)
+		return smtpResult, sent
+	}
+	lmtp, sent := scan("220 test.example.com Dovecot ready.\r\n",
+		"500 5.5.1 Unknown command\r\n", "250-test.example.com\r\n250 STARTTLS\r\n", "220 2.0.0 Begin TLS.\r\n")
+	if want := []string{"EHLO scanner.example.com\r\n", "LHLO scanner.example.com\r\n", "STARTTLS\r\n"}; strings.Join(sent, "") != strings.Join(want, "") || !lmtp.LMTP || lmtp.FTP || lmtp.FEAT != "" {
+		t.Errorf("LMTP server: sent %q, result %+v", sent, lmtp)
+	}
+	ftp, sent := scan("220 Service ready for new user.\r\n",
+		"500 Unknown command\r\n", "500 Unknown command\r\n", "234 AUTH TLS ok\r\n")
+	if want := []string{"EHLO scanner.example.com\r\n", "LHLO scanner.example.com\r\n", "AUTH TLS\r\n"}; strings.Join(sent, "") != strings.Join(want, "") || ftp.LMTP || !ftp.FTP || ftp.AuthTLS == "" {
+		t.Errorf("FTP server: sent %q, result %+v", sent, ftp)
+	}
+}
+
 // TestSSLv2AfterFTPAuthTLS checks that --sslv2 also follows an AUTH TLS
 // granted to an FTP server found by --ftp-fallback.
 func TestSSLv2AfterFTPAuthTLS(t *testing.T) {
