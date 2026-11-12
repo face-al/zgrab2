@@ -18,6 +18,7 @@ import (
 	"github.com/zmap/zgrab2/modules/mongodb"
 	"github.com/zmap/zgrab2/modules/mssql"
 	"github.com/zmap/zgrab2/modules/mysql"
+	"github.com/zmap/zgrab2/modules/nntp"
 	"github.com/zmap/zgrab2/modules/ntp"
 	"github.com/zmap/zgrab2/modules/oracle"
 	"github.com/zmap/zgrab2/modules/pcworx"
@@ -50,6 +51,7 @@ func init() {
 		"mongodb":   mongodb.NewModule(),
 		"mssql":     mssql.NewModule(),
 		"mysql":     mysql.NewModule(),
+		"nntp":      nntp.NewModule(),
 		"ntp":       ntp.NewModule(),
 		"oracle":    oracle.NewModule(),
 		"pcworx":    pcworx.NewModule(),
