@@ -19,6 +19,7 @@ pop3_scan_response = SubRecord(
                 ),
                 "quit": String(doc="The server's response to the QUIT command."),
                 "tls": zgrab2.tls_log,
+                "sslv2": zgrab2.sslv2_upgrade,
             }
         )
     },

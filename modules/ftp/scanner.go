@@ -8,6 +8,10 @@
 //
 // The output is the banner, any responses to the AUTH TLS/AUTH SSL commands,
 // and any TLS logs.
+//
+// With --sslv2, after the server accepts AUTH TLS or AUTH SSL the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package ftp
 
 import (
@@ -20,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // ScanResults is the output of the scan.
@@ -43,6 +48,10 @@ type ScanResults struct {
 	// TLSLog is the standard shared TLS handshake log.
 	// Only present if the FTPAuthTLS flag is set.
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 }
 
 // Flags are the FTP-specific command-line flags. Taken from the original zgrab.
@@ -53,6 +62,7 @@ type Flags struct {
 
 	FTPAuthTLS  bool `long:"authtls" description:"Collect FTPS certificates in addition to FTP banners"`
 	ImplicitTLS bool `long:"implicit-tls" description:"Attempt to connect via a TLS wrapped connection"`
+	SSLv2       bool `long:"sslv2" description:"After the server accepts AUTH TLS or AUTH SSL, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply (requires --authtls)"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -80,6 +90,9 @@ type Connection struct {
 func (f Flags) Validate(_ []string) (err error) {
 	if f.FTPAuthTLS && f.ImplicitTLS {
 		err = errors.New("cannot specify both '--authtls' and '--implicit-tls' together")
+	}
+	if f.SSLv2 && !f.FTPAuthTLS {
+		err = errors.New("'--sslv2' requires '--authtls'")
 	}
 	return
 }
@@ -182,6 +195,14 @@ func (ftp *Connection) GetFTPSCertificates(ctx context.Context, target *zgrab2.S
 	if !ftpsReady {
 		return nil
 	}
+	if ftp.config.SSLv2 {
+		var status zgrab2.ScanStatus
+		status, ftp.results.SSLv2, err = sslv2.ProbeUpgrade(ftp.conn)
+		if err != nil {
+			return zgrab2.NewScanError(status, err)
+		}
+		return nil
+	}
 	var conn *zgrab2.TLSConnection
 	conn, err = tlsWrapper(ctx, target, ftp.conn)
 	if conn != nil {
@@ -202,6 +223,8 @@ func (ftp *Connection) GetFTPSCertificates(ctx context.Context, target *zgrab2.S
 //     send the AUTH SSL command. If the response is not 2XX, then finish.
 //   - Perform ths TLS handshake / any configured TLS scans, populating
 //     results.TLSLog.
+//   - With --sslv2, send an SSL 2.0 CLIENT-HELLO instead, populating
+//     results.SSLv2.
 //   - Return SCAN_SUCCESS, &results, nil
 func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup, target *zgrab2.ScanTarget) (zgrab2.ScanStatus, any, error) {
 	var err error
