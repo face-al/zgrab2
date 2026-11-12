@@ -29,6 +29,7 @@ import (
 	"github.com/zmap/zgrab2/modules/smb"
 	"github.com/zmap/zgrab2/modules/smtp"
 	"github.com/zmap/zgrab2/modules/telnet"
+	"github.com/zmap/zgrab2/modules/xmpp"
 )
 
 var defaultModules zgrab2.ModuleSet
@@ -63,6 +64,7 @@ func init() {
 		"ssh":       &modules.SSHModule{},
 		"telnet":    telnet.NewModule(),
 		"tls":       &modules.TLSModule{},
+		"xmpp":      xmpp.NewModule(),
 	}
 }
 
