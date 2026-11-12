@@ -3,6 +3,10 @@
 // Default port: 4190 (TCP)
 //
 // RFC 5804: https://tools.ietf.org/html/rfc5804
+//
+// With --sslv2, after STARTTLS the scanner sends an SSL 2.0 CLIENT-HELLO
+// (lib/sslv2) instead of the TLS handshake and stops after the reply; the
+// outcome goes to the sslv2 field and is the scan status.
 package managesieve
 
 import (
@@ -17,6 +21,7 @@ import (
 	"time"
 
 	"github.com/zmap/zgrab2"
+	"github.com/zmap/zgrab2/lib/sslv2"
 )
 
 // Flags holds the command-line configuration for the ManageSieve scan module.
@@ -24,6 +29,7 @@ type Flags struct {
 	zgrab2.BaseFlags `group:"Basic Options"`
 	zgrab2.TLSFlags  `group:"TLS Options"`
 	BannerTimeout    time.Duration `long:"banner-timeout" description:"Set max for how long to wait for server to send capabilities after connection establishment (0 = no timeout)" default:"10s"`
+	SSLv2            bool          `long:"sslv2" description:"After STARTTLS, send an SSL 2.0 CLIENT-HELLO instead of the TLS handshake and stop after its reply"`
 }
 
 func NewModule() *zgrab2.TypedModule[Flags, Scanner, *Scanner] {
@@ -58,6 +64,10 @@ type ScanResults struct {
 
 	// TLSLog contains the TLS handshake log if TLS was used
 	TLSLog *zgrab2.TLSLog `json:"tls,omitempty"`
+
+	// SSLv2 is the reply to the SSL 2.0 CLIENT-HELLO sent instead of the TLS
+	// handshake, if --sslv2 is used.
+	SSLv2 *sslv2.UpgradeResult `json:"sslv2,omitempty"`
 
 	// StartTLSResponse is the server response to the STARTTLS command
 	StartTLSResponse string `json:"starttls_response,omitempty"`
@@ -134,6 +144,12 @@ func (scanner *Scanner) Scan(ctx context.Context, dialerGroup *zgrab2.DialerGrou
 			return zgrab2.SCAN_PROTOCOL_ERROR, results, fmt.Errorf("failed to read STARTTLS reply: %v", err)
 		}
 		results.StartTLSResponse = strings.ReplaceAll(results.StartTLSResponse, "\"", "") // Clean quotes
+
+		if scanner.config.SSLv2 {
+			var status zgrab2.ScanStatus
+			status, results.SSLv2, err = sslv2.ProbeUpgrade(conn)
+			return status, results, err
+		}
 
 		// Initiate TLS Handshake
 		tlsConn, err := dialerGroup.TLSWrapper(ctx, target, conn)
