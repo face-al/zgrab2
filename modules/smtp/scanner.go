@@ -33,6 +33,15 @@
 // server greets like SMTP but must not accept EHLO, 500 recommended (RFC 2033,
 // section 4.1), so a 250 reply to LHLO identifies LMTP; its capabilities then
 // decide STARTTLS, as the EHLO reply does for SMTP.
+//
+// With --ftp-fallback (needs EHLO, e.g. --send-ehlo-override), an EHLO
+// refused with a 5xx reply is followed by AUTH TLS on the same connection, as
+// TLS-Attacker opens FTP. An FTP server can greet with a bare 220 like SMTP;
+// 234 grants AUTH TLS (RFC 4217, section 4) and is no SMTP reply code, so the
+// server is marked FTP and the TLS handshake follows. Otherwise FEAT is sent:
+// 211 (RFC 2389, section 3.2) marks an FTP server, which is sent AUTH TLS once
+// more if it refused with 503, as TLS-Attacker retries after discovery. An FTP
+// server without AUTH TLS ends like an SMTP server without STARTTLS.
 package smtp
 
 import (
@@ -40,11 +49,21 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/zmap/zgrab2"
 	"github.com/zmap/zgrab2/lib/sslv2"
+)
+
+// FTP replies as TLS-Attacker matches them (FTP: AUTH TLS ^234 , FEAT ^211 ):
+// AUTH TLS granted (RFC 4217, section 4), and FEAT listing features or saying
+// there are none (RFC 2389, section 3.2).
+var (
+	authTLSOKRegex   = regexp.MustCompile(`(?m)^234 `)
+	featOKRegex      = regexp.MustCompile(`(?m)^211 `)
+	badSequenceRegex = regexp.MustCompile(`^503 `)
 )
 
 // ErrInvalidResponse is returned when the server returns an invalid or unexpected response.
@@ -67,6 +86,18 @@ type ScanResults struct {
 
 	// LMTP is true if the server accepted LHLO (code 250), i.e. it speaks LMTP.
 	LMTP bool `json:"lmtp,omitempty"`
+
+	// FEAT is the server's response to the FEAT command, sent with
+	// --ftp-fallback after EHLO and AUTH TLS are refused.
+	FEAT string `json:"feat,omitempty"`
+
+	// FTP is true if the server granted AUTH TLS (234) or answered FEAT
+	// with 211, i.e. it speaks FTP.
+	FTP bool `json:"ftp,omitempty"`
+
+	// AuthTLS is the response to the AUTH TLS command, sent with
+	// --ftp-fallback after EHLO is refused (the last one if sent twice).
+	AuthTLS string `json:"auth_tls,omitempty"`
 
 	// HELP is the server's response to the HELP command, if it is sent.
 	HELP string `json:"help,omitempty"`
@@ -122,6 +153,9 @@ type Flags struct {
 	// LHLOFallback sends LHLO after EHLO is refused, to recognize LMTP servers.
 	LHLOFallback bool `long:"lhlo-fallback" description:"If EHLO is refused with 500 or 503, send LHLO (with the EHLO domain) to recognize an LMTP server (RFC 2033); needs EHLO, e.g. --send-ehlo-override"`
 
+	// FTPFallback sends AUTH TLS (then FEAT) after EHLO is refused, to recognize FTP servers.
+	FTPFallback bool `long:"ftp-fallback" description:"If EHLO is refused with a 5xx reply, send AUTH TLS, then FEAT if refused; 234 (RFC 4217) or 211 (RFC 2389) marks an FTP server, whose AUTH TLS replaces STARTTLS; needs --send-ehlo-override"`
+
 	// HELODomain is the client domain sent with HELO; empty falls back to the target domain.
 	HELODomain string `long:"helo-domain" description:"Client domain to send with the HELO command (default: target domain)"`
 }
@@ -152,6 +186,13 @@ func (flags Flags) Validate(_ []string) error {
 	}
 	if flags.SSLv2 && flags.SMTPSecure {
 		return errors.New("cannot use --smtps and --sslv2 at the same time")
+	}
+	if flags.FTPFallback && !flags.SendEHLOOverride {
+		// an FTP greeting never says ESMTP, so without the override HELO is sent
+		return errors.New("--ftp-fallback needs --send-ehlo-override: AUTH TLS follows a refused EHLO")
+	}
+	if flags.FTPFallback && flags.SMTPSecure {
+		return errors.New("cannot use --ftp-fallback with --smtps")
 	}
 	return nil
 }
@@ -314,6 +355,13 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 				}
 			}
 		}
+		// An FTP server answers EHLO with an error (FileZilla 500 or 501,
+		// vsftpd and Apache FtpServer 530).
+		if code, codeErr := getSMTPCode(ret); scanner.config.FTPFallback && codeErr == nil && code >= 500 && code < 600 {
+			if err := scanner.probeFTP(&smtpConn, result); err != nil {
+				return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send AUTH TLS command: %w", err)
+			}
+		}
 	} else {
 		// send a HELO msg since server doesn't support EHLO
 		domain := scanner.config.HELODomain
@@ -327,7 +375,8 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		result.HELO = ret
 		moduleMetadata.incrementHostsSupportingHELO() // mark that we found a host that supports HELO
 	}
-	if scanner.config.SendHELP {
+	// HELP would break an accepted AUTH TLS, which wants the handshake next
+	if scanner.config.SendHELP && !result.FTP {
 		ret, err := smtpConn.SendCommand("HELP")
 		if err != nil {
 			return appErrStatus(), result, fmt.Errorf("could not send HELP command: %w", err)
@@ -339,24 +388,33 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		serverSupportsSTARTTLS = lhloSupportsSTARTTLS(result.LHLO)
 	}
 	shouldSendSTARTTLS := scanner.config.SendSTARTTLSOverride || serverSupportsSTARTTLS
+	// An FTP server was sent AUTH TLS by probeFTP; it is upgraded only if it
+	// granted it, and gets no STARTTLS
+	ftpUpgrade := result.FTP && authTLSOKRegex.MatchString(result.AuthTLS)
+	if result.FTP {
+		shouldSendSTARTTLS = ftpUpgrade
+	}
 	// If the server supports STARTTLS or user requests STARTTLS, and we haven't already negotiated a TLS connection
 	if shouldSendSTARTTLS && !scanner.config.SMTPSecure {
-		ret, err := smtpConn.SendCommand("STARTTLS")
-		if err != nil {
-			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send STARTTLS command: %w", err)
+		if !ftpUpgrade {
+			ret, err := smtpConn.SendCommand("STARTTLS")
+			if err != nil {
+				return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not send STARTTLS command: %w", err)
+			}
+			result.StartTLS = ret
+			code, err := getSMTPCode(ret)
+			if err != nil {
+				return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not get STARTTLS command code: %w", err)
+			}
+			if code < 200 || code >= 300 {
+				return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("SMTP error code %d returned from STARTTLS command (%s)", code, strings.TrimSpace(ret))
+			}
 		}
-		result.StartTLS = ret
-		code, err := getSMTPCode(ret)
-		if err != nil {
-			return zgrab2.TryGetScanStatus(err), result, fmt.Errorf("could not get STARTTLS command code: %w", err)
-		}
-		if code < 200 || code >= 300 {
-			return zgrab2.SCAN_APPLICATION_ERROR, result, fmt.Errorf("SMTP error code %d returned from STARTTLS command (%s)", code, strings.TrimSpace(ret))
-		}
+		// SSL 2.0 after either upgrade: STARTTLS, or AUTH TLS of an FTP server
 		if scanner.config.SSLv2 {
-			var status zgrab2.ScanStatus
-			status, result.SSLv2, err = sslv2.ProbeUpgrade(smtpConn.Conn)
-			return status, result, err
+			status, upgrade, sslv2Err := sslv2.ProbeUpgrade(smtpConn.Conn)
+			result.SSLv2 = upgrade
+			return status, result, sslv2Err
 		}
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {
@@ -402,4 +460,40 @@ func lhloSupportsSTARTTLS(lhlo string) bool {
 		}
 	}
 	return false
+}
+
+// probeFTP sends AUTH TLS to a server that refused EHLO, then FEAT if AUTH
+// TLS is refused, and AUTH TLS once more if FEAT shows an FTP server and the
+// refusal was 503; this is TLS-Attacker's FTP sequence (AUTH TLS, FEAT
+// discovery and retry on its bad-sequence reply ^503 ). The first two commands
+// are only a probe: if one cannot be sent (the server closed the connection),
+// the result stays that of an SMTP server. Only a failed retry, to a server
+// known to be FTP, is an error.
+func (scanner *Scanner) probeFTP(conn *Connection, result *ScanResults) error {
+	ret, err := conn.SendCommand("AUTH TLS")
+	if err != nil {
+		return nil
+	}
+	result.AuthTLS = ret
+	if authTLSOKRegex.MatchString(ret) {
+		result.FTP = true
+		return nil
+	}
+	feat, err := conn.SendCommand("FEAT")
+	if err != nil {
+		return nil
+	}
+	result.FEAT = feat
+	if !featOKRegex.MatchString(feat) {
+		return nil
+	}
+	result.FTP = true
+	if !badSequenceRegex.MatchString(ret) {
+		return nil
+	}
+	if ret, err = conn.SendCommand("AUTH TLS"); err != nil {
+		return err
+	}
+	result.AuthTLS = ret
+	return nil
 }

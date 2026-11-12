@@ -30,6 +30,7 @@ function testEHLO() {
   CONTAINER_NAME=zgrab_smtp_ehlo_starttls
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp > $ZGRAB_OUTPUT/smtp/ehlo_starttls.json
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp --send-ehlo-override --lhlo-fallback > $ZGRAB_OUTPUT/smtp/ehlo_lhlo_fallback.json
+  CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp --send-ehlo-override --ftp-fallback > $ZGRAB_OUTPUT/smtp/ehlo_ftp_fallback.json
   dumpDockerLogs
   CONTAINER_NAME=zgrab_smtp_ehlo_no_starttls
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp > $ZGRAB_OUTPUT/smtp/ehlo_no_starttls.json
@@ -91,6 +92,11 @@ checkFileForLackOfField $OUTPUT_ROOT/ehlo_no_starttls.json starttls
 checkFileForField $OUTPUT_ROOT/ehlo_lhlo_fallback.json tls
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_lhlo_fallback.json lhlo
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_lhlo_fallback.json lmtp
+# An SMTP server accepts EHLO, so --ftp-fallback sends neither AUTH TLS nor FEAT
+checkFileForField $OUTPUT_ROOT/ehlo_ftp_fallback.json tls
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json feat
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json ftp
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_ftp_fallback.json auth_tls
 
 
 exit $status
