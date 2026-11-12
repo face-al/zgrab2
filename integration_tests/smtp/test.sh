@@ -29,6 +29,7 @@ function testHelo() {
 function testEHLO() {
   CONTAINER_NAME=zgrab_smtp_ehlo_starttls
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp > $ZGRAB_OUTPUT/smtp/ehlo_starttls.json
+  CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp --send-ehlo-override --lhlo-fallback > $ZGRAB_OUTPUT/smtp/ehlo_lhlo_fallback.json
   dumpDockerLogs
   CONTAINER_NAME=zgrab_smtp_ehlo_no_starttls
   CONTAINER_NAME=$CONTAINER_NAME $ZGRAB_ROOT/docker-runner/docker-run.sh smtp > $ZGRAB_OUTPUT/smtp/ehlo_no_starttls.json
@@ -86,6 +87,10 @@ checkFileForField $OUTPUT_ROOT/smtps-tls.json tls
 checkFileForLackOfField $OUTPUT_ROOT/smtps-tls.json starttls
 checkFileForLackOfField $OUTPUT_ROOT/helo.json starttls
 checkFileForLackOfField $OUTPUT_ROOT/ehlo_no_starttls.json starttls
+# An SMTP server accepts EHLO, so --lhlo-fallback sends no LHLO
+checkFileForField $OUTPUT_ROOT/ehlo_lhlo_fallback.json tls
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_lhlo_fallback.json lhlo
+checkFileForLackOfField $OUTPUT_ROOT/ehlo_lhlo_fallback.json lmtp
 
 
 exit $status

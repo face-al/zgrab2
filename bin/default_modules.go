@@ -13,6 +13,7 @@ import (
 	"github.com/zmap/zgrab2/modules/http"
 	"github.com/zmap/zgrab2/modules/imap"
 	"github.com/zmap/zgrab2/modules/ipp"
+	"github.com/zmap/zgrab2/modules/lmtp"
 	"github.com/zmap/zgrab2/modules/memcached"
 	"github.com/zmap/zgrab2/modules/modbus"
 	"github.com/zmap/zgrab2/modules/mongodb"
@@ -45,6 +46,7 @@ func init() {
 		"http":      http.NewModule(),
 		"imap":      imap.NewModule(),
 		"ipp":       ipp.NewModule(),
+		"lmtp":      lmtp.NewModule(),
 		"memcached": memcached.NewModule(),
 		"modbus":    modbus.NewModule(),
 		"mongodb":   mongodb.NewModule(),
